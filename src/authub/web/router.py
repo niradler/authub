@@ -9,7 +9,7 @@ from pydantic import EmailStr
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
-from authub.errors import AuthubError, InvalidStateError, InvalidTokenError
+from authub.errors import AuthubError, InvalidStateError
 from authub.models import ConnectionInfo
 from authub.state import STATE_COOKIE
 from authub.web.deps import extract_token
@@ -118,7 +118,7 @@ def build_router(hub: Authub) -> APIRouter:
                 try:
                     claims = await hub.tokens.verify(pair[0])
                     await hub.revocation.revoke(claims.jti, claims.exp)
-                except InvalidTokenError:
+                except AuthubError:
                     pass
         response = JSONResponse({"ok": True})
         config = hub.session_cookie
