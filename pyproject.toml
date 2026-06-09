@@ -51,6 +51,7 @@ dev = [
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+extend-exclude = ["refs"]  # read-only reference checkouts - never lint or format them
 
 [tool.ruff.lint]
 select = [
