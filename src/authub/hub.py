@@ -80,8 +80,8 @@ class Authub:
     def _register_saml(self) -> None:
         try:
             from authub.protocols.saml import SamlProtocol  # noqa: PLC0415
-        except ImportError:
-            logger.debug("pysaml2 not installed; SAML protocol not registered")
+        except Exception:
+            logger.debug("pysaml2 unavailable; SAML protocol not registered")
             return
         self.registry.register(SamlProtocol())
 

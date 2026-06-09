@@ -11,6 +11,7 @@ from pydantic import (
     SecretStr,
     SerializeAsAny,
     field_validator,
+    model_validator,
 )
 
 CONNECTION_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
@@ -98,6 +99,26 @@ class OAuth2Settings(ProtocolSettings):
     client_id: str
     client_secret: SecretStr
     scopes: list[str] = Field(default_factory=list)
+
+
+@register_settings
+class SamlSettings(ProtocolSettings):
+    kind: Literal["saml"] = "saml"
+    sp_entity_id: str
+    idp_metadata_xml: str | None = None
+    idp_metadata_url: AnyHttpUrl | None = None
+    idp_entity_id: str | None = None
+    want_assertions_signed: bool = True
+    want_response_signed: bool = False
+    name_id_format: str = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
+    acs_url: AnyHttpUrl | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_metadata_source(self) -> SamlSettings:
+        if (self.idp_metadata_xml is None) == (self.idp_metadata_url is None):
+            msg = "provide exactly one of idp_metadata_xml or idp_metadata_url"
+            raise ValueError(msg)
+        return self
 
 
 class Connection(BaseModel):

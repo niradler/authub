@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import SecretStr
 
-from authub.models import Mapping, OAuth2Settings, OidcSettings
+from authub.models import Mapping, OAuth2Settings, OidcSettings, SamlSettings
 
 GITHUB_MAPPING = Mapping(external_id="id", email="email", name="name")
 
@@ -82,3 +82,23 @@ def github(client_id: str, client_secret: str) -> OAuth2Settings:
 
 def dev_idp(issuer: str, client_id: str, client_secret: str) -> OidcSettings:
     return oidc(issuer, client_id, client_secret)
+
+
+SAML_MAPPING = Mapping(external_id="name_id", email="mail", name="cn")
+
+
+def saml(
+    *,
+    sp_entity_id: str,
+    idp_metadata_xml: str | None = None,
+    idp_metadata_url: str | None = None,
+    idp_entity_id: str | None = None,
+    want_assertions_signed: bool = True,
+) -> SamlSettings:
+    return SamlSettings(
+        sp_entity_id=sp_entity_id,
+        idp_metadata_xml=idp_metadata_xml,
+        idp_metadata_url=idp_metadata_url,  # type: ignore[arg-type]
+        idp_entity_id=idp_entity_id,
+        want_assertions_signed=want_assertions_signed,
+    )
