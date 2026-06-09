@@ -2,4 +2,7 @@
 .dist
 dist
 *_cache
+__pycache__
+.claude
+docs
 refs
