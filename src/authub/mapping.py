@@ -10,7 +10,6 @@ from authub.models import CanonicalIdentity, Mapping, RawIdentity
 
 
 def extract(claims: dict[str, Any], path: str) -> Any:
-    """Walk dotted keys through nested dicts. Returns None when any segment is absent."""
     value: Any = claims
     for part in path.split("."):
         if not isinstance(value, dict):
@@ -47,8 +46,6 @@ def register_transform(name: str, fn: Callable[[str], str]) -> None:
 
 
 class Mapper:
-    """Raw protocol claims -> CanonicalIdentity, driven by a typed Mapping."""
-
     def normalize(self, raw: RawIdentity, mapping: Mapping) -> CanonicalIdentity:
         external_id = _scalar(extract(raw.claims, mapping.external_id))
         if external_id is None or str(external_id) == "":
@@ -84,7 +81,11 @@ class Mapper:
                 raise MappingError(f"unknown transform {transform_name!r}")
             target = fields.get(field_name, fields["attributes"].get(field_name))
             if isinstance(target, str):
+                try:
+                    value = transform(target)
+                except Exception as exc:
+                    raise MappingError(f"transform {transform_name!r} raised an error") from exc
                 if field_name in fields:
-                    fields[field_name] = transform(target)
+                    fields[field_name] = value
                 else:
-                    fields["attributes"][field_name] = transform(target)
+                    fields["attributes"][field_name] = value

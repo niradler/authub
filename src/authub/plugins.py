@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -26,8 +27,8 @@ class Plugin:
 
 
 class PluginChain:
-    def __init__(self, plugins: list[Plugin]) -> None:
-        self._plugins = plugins
+    def __init__(self, plugins: Sequence[Plugin] = ()) -> None:
+        self._plugins = list(plugins)
 
     async def on_identity(self, raw: RawIdentity, conn: Connection) -> None:
         for plugin in self._plugins:
