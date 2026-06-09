@@ -35,6 +35,10 @@ class FlowStateCodec:
         self._key = OctKey.import_key(raw)
         self._ttl = ttl_seconds
 
+    @property
+    def ttl_seconds(self) -> int:
+        return self._ttl
+
     def encode(self, flow_state: FlowState) -> str:
         now = int(time.time())
         claims: dict[str, object] = {

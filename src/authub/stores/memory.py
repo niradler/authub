@@ -25,7 +25,7 @@ class InMemoryConnectionStore(ConnectionStore):
     async def get(self, connection_id: str) -> Connection:
         conn = self._by_id.get(connection_id)
         if conn is None:
-            raise ConnectionNotFoundError(f"Connection {connection_id!r} not found")
+            raise ConnectionNotFoundError()
         return conn
 
     async def list_for_tenant(self, tenant_id: str) -> list[Connection]:

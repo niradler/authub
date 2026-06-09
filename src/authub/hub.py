@@ -3,12 +3,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from datetime import timedelta
+from functools import cached_property
 
+from fastapi import APIRouter, FastAPI
 from pydantic import SecretStr
 
 from authub.email.base import EmailSender
 from authub.email.console import ConsoleEmailSender
-from authub.errors import ForbiddenError, TokenRevokedError
+from authub.errors import AuthubError, ForbiddenError, TokenRevokedError
 from authub.flow import AuthFlow
 from authub.mapping import Mapper
 from authub.models import Principal, PrincipalType, SessionCookieConfig, TokenClaims
@@ -21,6 +23,13 @@ from authub.stores.base import ConnectionStore, UserStore
 from authub.stores.memory import InMemoryUserStore
 from authub.tokens.base import RevocationStore, TokenService
 from authub.tokens.claims import build_service_claims
+from authub.web.deps import (
+    PrincipalDependency,
+    make_principal_dependency,
+    make_roles_dependency,
+    make_scopes_dependency,
+)
+from authub.web.router import authub_error_handler, build_router
 
 logger = logging.getLogger(__name__)
 
@@ -91,3 +100,25 @@ class Authub:
         claims = build_service_claims(principal, ttl)
         claims = await self.plugins.before_issue_token(claims, principal, None)
         return await self.tokens.sign(claims)
+
+    @property
+    def current_user(self) -> PrincipalDependency:
+        return make_principal_dependency(self, PrincipalType.USER)
+
+    @property
+    def current_principal(self) -> PrincipalDependency:
+        return make_principal_dependency(self)
+
+    def require_scopes(self, *scopes: str) -> PrincipalDependency:
+        return make_scopes_dependency(self, scopes)
+
+    def require_roles(self, *roles: str) -> PrincipalDependency:
+        return make_roles_dependency(self, roles)
+
+    @cached_property
+    def router(self) -> APIRouter:
+        return build_router(self)
+
+    def attach(self, app: FastAPI, prefix: str = "/auth") -> None:
+        app.include_router(self.router, prefix=prefix)
+        app.add_exception_handler(AuthubError, authub_error_handler)
