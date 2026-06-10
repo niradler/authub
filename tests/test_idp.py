@@ -2,22 +2,37 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import time
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from joserfc import jwt
-from joserfc.jwk import KeySet
+from joserfc.jwk import KeySet, RSAKey
 from pydantic import SecretStr
 
 from authub.idp.models import IdpClient
 from authub.idp.provider import AuthubIdp
-from authub.idp.store import InMemoryIdpUserStore, hash_password, verify_password
+from authub.idp.store import (
+    IdpGrantStore,
+    InMemoryIdpGrantStore,
+    InMemoryIdpUserStore,
+    hash_password,
+    verify_password,
+)
 
 ISSUER = "http://testserver/idp"
 REDIRECT = "http://app.test/cb"
 
 
-def make_idp(auto_login: str | None = None) -> AuthubIdp:
+def make_idp(
+    auto_login: str | None = None,
+    *,
+    grants: IdpGrantStore | None = None,
+    signing_key: str | RSAKey | None = None,
+    max_login_attempts: int = 5,
+    lockout_seconds: int = 300,
+) -> AuthubIdp:
     users = InMemoryIdpUserStore()
     users.add_user("alice", "wonderland", email="alice@acme.test", name="Alice")
     return AuthubIdp(
@@ -27,6 +42,10 @@ def make_idp(auto_login: str | None = None) -> AuthubIdp:
         ],
         users=users,
         auto_login=auto_login,
+        grants=grants,
+        signing_key=signing_key,
+        max_login_attempts=max_login_attempts,
+        lockout_seconds=lockout_seconds,
     )
 
 
@@ -219,3 +238,200 @@ async def test_userinfo_with_access_token() -> None:
         bad = await client.get("/idp/userinfo", headers={"Authorization": "Bearer junk"})
     assert userinfo.json()["email"] == "alice@acme.test"
     assert bad.status_code == 401
+
+
+async def test_login_form_heading_is_authub_idp() -> None:
+    async with make_client(make_idp()) as client:
+        response = await client.get("/idp/authorize", params=AUTHORIZE_PARAMS)
+    assert "authub IdP" in response.text
+    assert "dev IdP" not in response.text
+
+
+async def test_default_sub_prefix_is_authub() -> None:
+    users = InMemoryIdpUserStore()
+    user = users.add_user("bob", "pw")
+    assert user.sub.startswith("authub|")
+
+
+async def test_router_tag_is_authub_idp() -> None:
+    idp = make_idp()
+    routes = idp.router.routes
+    for route in routes:
+        for tag in getattr(route, "tags", []):
+            assert tag != "dev-idp"
+    assert (
+        any(tag == "authub-idp" for route in routes for tag in getattr(route, "tags", []))
+        or "authub-idp" in idp.router.tags
+    )
+
+
+async def test_injectable_signing_key_jwks_match() -> None:
+    pem_key = RSAKey.generate_key(2048, auto_kid=True)
+    pem = pem_key.as_pem(private=True).decode()
+
+    idp1 = make_idp(signing_key=pem)
+    idp2 = make_idp(signing_key=pem)
+
+    assert idp1.jwks() == idp2.jwks()
+
+
+async def test_injectable_signing_key_cross_validate() -> None:
+    pem = RSAKey.generate_key(2048, auto_kid=True).as_pem(private=True).decode()
+
+    idp1 = make_idp(signing_key=pem)
+    idp2 = make_idp(signing_key=pem)
+
+    async with make_client(idp1) as client:
+        code = await get_code(client)
+        token_resp = await client.post(
+            "/idp/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT,
+                "code_verifier": "v" * 43,
+                "client_id": "app",
+                "client_secret": "shh",
+            },
+        )
+    id_token = token_resp.json()["id_token"]
+
+    jwks2 = KeySet.import_key_set(idp2.jwks())
+    decoded = jwt.decode(id_token, jwks2, algorithms=["RS256"])
+    assert decoded.claims["iss"] == ISSUER
+
+
+async def test_injectable_signing_key_as_rsakey_object() -> None:
+    rsa_key = RSAKey.generate_key(2048, auto_kid=True)
+    idp1 = make_idp(signing_key=rsa_key)
+    idp2 = make_idp(signing_key=rsa_key)
+    assert idp1.jwks() == idp2.jwks()
+
+
+async def test_injectable_signing_key_without_kid_gets_kid() -> None:
+    pem_key = RSAKey.generate_key(2048, auto_kid=True)
+    pem = pem_key.as_pem(private=True).decode()
+
+    pem_key_no_kid = RSAKey.import_key(pem)
+    assert pem_key_no_kid.kid is None
+
+    idp = make_idp(signing_key=pem)
+    assert idp._key.kid is not None
+
+
+async def test_grant_store_injectable() -> None:
+    store = InMemoryIdpGrantStore()
+    idp = make_idp(grants=store)
+
+    async with make_client(idp) as client:
+        code = await get_code(client)
+        resp = await client.post(
+            "/idp/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT,
+                "code_verifier": "v" * 43,
+                "client_id": "app",
+                "client_secret": "shh",
+            },
+        )
+    assert resp.status_code == 200
+
+
+async def test_grant_store_abc_subclassable() -> None:
+    assert issubclass(InMemoryIdpGrantStore, IdpGrantStore)
+
+
+async def test_brute_force_lockout_after_max_attempts() -> None:
+    idp = make_idp(max_login_attempts=3, lockout_seconds=300)
+    async with make_client(idp) as client:
+        for _ in range(3):
+            r = await client.post(
+                "/idp/login",
+                data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wrong"},
+            )
+            assert r.status_code == 401
+
+        locked = await client.post(
+            "/idp/login",
+            data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wrong"},
+        )
+    assert locked.status_code == 429
+    assert "Too many attempts" in locked.text
+
+
+async def test_brute_force_lockout_correct_password_still_blocked() -> None:
+    idp = make_idp(max_login_attempts=2, lockout_seconds=300)
+    async with make_client(idp) as client:
+        for _ in range(2):
+            await client.post(
+                "/idp/login",
+                data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wrong"},
+            )
+
+        still_blocked = await client.post(
+            "/idp/login",
+            data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wonderland"},
+        )
+    assert still_blocked.status_code == 429
+
+
+async def test_brute_force_clears_after_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    idp = make_idp(max_login_attempts=2, lockout_seconds=10)
+    real_time = time.time
+    async with make_client(idp) as client:
+        for _ in range(2):
+            await client.post(
+                "/idp/login",
+                data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wrong"},
+            )
+
+        locked = await client.post(
+            "/idp/login",
+            data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wrong"},
+        )
+        assert locked.status_code == 429
+
+        monkeypatch.setattr("authub.idp.provider.time.time", lambda: real_time() + 11)
+
+        unlocked = await client.post(
+            "/idp/login",
+            data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wonderland"},
+        )
+    assert unlocked.status_code == 302
+
+
+async def test_successful_login_clears_failure_counter() -> None:
+    idp = make_idp(max_login_attempts=3, lockout_seconds=300)
+    async with make_client(idp) as client:
+        for _ in range(2):
+            await client.post(
+                "/idp/login",
+                data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wrong"},
+            )
+
+        ok = await client.post(
+            "/idp/login",
+            data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wonderland"},
+        )
+        assert ok.status_code == 302
+
+        code = ok.headers["location"].split("code=")[1].split("&")[0]
+        await client.post(
+            "/idp/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT,
+                "code_verifier": "v" * 43,
+                "client_id": "app",
+                "client_secret": "shh",
+            },
+        )
+
+        still_ok = await client.post(
+            "/idp/login",
+            data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wonderland"},
+        )
+    assert still_ok.status_code == 302

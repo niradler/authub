@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import html
+import logging
 import secrets
 import time
 from collections.abc import Sequence
@@ -18,7 +19,14 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from authub.idp.models import AuthCode, IdpClient, IdpUser
-from authub.idp.store import IdpUserStore, InMemoryIdpUserStore
+from authub.idp.store import (
+    IdpGrantStore,
+    IdpUserStore,
+    InMemoryIdpGrantStore,
+    InMemoryIdpUserStore,
+)
+
+logger = logging.getLogger(__name__)
 
 _AUTHORIZE_FIELDS = (
     "response_type",
@@ -44,7 +52,7 @@ def _login_form(action: str, params: dict[str, str], error: str | None) -> str:
     )
     message = f"<p>{html.escape(error)}</p>" if error else ""
     return (
-        "<!doctype html><html><body><h1>authub dev IdP</h1>"
+        "<!doctype html><html><body><h1>authub IdP</h1>"
         f'{message}<form method="post" action="{html.escape(action)}">{hidden}'
         '<label>Username <input name="username" autocomplete="username"></label>'
         '<label>Password <input name="password" type="password"></label>'
@@ -53,27 +61,70 @@ def _login_form(action: str, params: dict[str, str], error: str | None) -> str:
 
 
 class AuthubIdp:
+    """Embedded OIDC authorization server.
+
+    Implements the authorization code flow with PKCE and optional client secret auth.
+    Suitable for production use when configured with a persistent signing_key,
+    a durable IdpUserStore, and (for multi-instance) a durable IdpGrantStore.
+    """
+
     def __init__(
         self,
         *,
         issuer: str,
         clients: Sequence[IdpClient],
         users: IdpUserStore | None = None,
+        grants: IdpGrantStore | None = None,
+        signing_key: str | RSAKey | None = None,
         auto_login: str | None = None,
         code_ttl_seconds: int = 60,
         token_ttl_seconds: int = 3600,
+        max_login_attempts: int = 5,
+        lockout_seconds: int = 300,
     ) -> None:
+        """Create an AuthubIdp instance.
+
+        Args:
+            issuer: Base URL of this IdP (no trailing slash).
+            clients: Registered OIDC clients.
+            users: User store. Defaults to InMemoryIdpUserStore.
+            grants: Grant/token store. Defaults to InMemoryIdpGrantStore.
+            signing_key: PEM string or RSAKey for signing JWTs. None generates
+                an ephemeral key (restarts invalidate existing tokens).
+            auto_login: Username to authenticate without showing the login form.
+            code_ttl_seconds: Authorization code lifetime in seconds.
+            token_ttl_seconds: Access/ID token lifetime in seconds.
+            max_login_attempts: Failed attempts before a username is locked out.
+            lockout_seconds: How long a locked-out username must wait.
+        """
         self.issuer = issuer.rstrip("/")
         self.users: IdpUserStore = users if users is not None else InMemoryIdpUserStore()
-        self.auto_login = auto_login
+        self._grants: IdpGrantStore = grants if grants is not None else InMemoryIdpGrantStore()
         self._clients = {client.client_id: client for client in clients}
-        self._key = RSAKey.generate_key(2048, auto_kid=True)
-        self._codes: dict[str, AuthCode] = {}
-        self._access_tokens: dict[str, tuple[str, int]] = {}
+        self._key = self._resolve_signing_key(signing_key)
+        self.auto_login = auto_login
         self._code_ttl = code_ttl_seconds
         self._token_ttl = token_ttl_seconds
+        self._max_attempts = max_login_attempts
+        self._lockout_seconds = lockout_seconds
+        self._login_failures: dict[str, tuple[int, float]] = {}
+
+    @staticmethod
+    def _resolve_signing_key(signing_key: str | RSAKey | None) -> RSAKey:
+        if signing_key is None:
+            return RSAKey.generate_key(2048, auto_kid=True)
+        if isinstance(signing_key, RSAKey):
+            key = signing_key
+        else:
+            key = RSAKey.import_key(
+                signing_key.encode() if isinstance(signing_key, str) else signing_key
+            )
+        if key.kid is None:
+            key.ensure_kid()
+        return key
 
     def jwks(self) -> KeySetSerialization:
+        """Return the public JWKS for this IdP."""
         return KeySet([self._key]).as_dict(private=False)
 
     def _validate_authorize_params(self, params: dict[str, str]) -> str | None:
@@ -93,9 +144,38 @@ class AuthubIdp:
             return "public clients must use PKCE"
         return None
 
-    def _issue_code_redirect(self, params: dict[str, str], user: IdpUser) -> RedirectResponse:
+    def _is_locked_out(self, username: str) -> bool:
+        entry = self._login_failures.get(username)
+        if entry is None:
+            return False
+        count, window_start = entry
+        if time.time() - window_start >= self._lockout_seconds:
+            del self._login_failures[username]
+            return False
+        return count >= self._max_attempts
+
+    def _record_failure(self, username: str) -> None:
+        entry = self._login_failures.get(username)
+        now = time.time()
+        if entry is None or now - entry[1] >= self._lockout_seconds:
+            self._login_failures[username] = (1, now)
+        else:
+            self._login_failures[username] = (entry[0] + 1, entry[1])
+
+    def _clear_failures(self, username: str) -> None:
+        self._login_failures.pop(username, None)
+
+    def _evict_stale_lockouts(self) -> None:
+        now = time.time()
+        stale = [
+            u for u, (_, ts) in self._login_failures.items() if now - ts >= self._lockout_seconds
+        ]
+        for u in stale:
+            del self._login_failures[u]
+
+    async def _issue_code_redirect(self, params: dict[str, str], user: IdpUser) -> RedirectResponse:
         code = secrets.token_urlsafe(32)
-        self._codes[code] = AuthCode(
+        auth_code = AuthCode(
             code=code,
             client_id=params["client_id"],
             redirect_uri=params["redirect_uri"],
@@ -105,6 +185,7 @@ class AuthubIdp:
             code_challenge=params.get("code_challenge") or None,
             expires_at=int(time.time()) + self._code_ttl,
         )
+        await self._grants.save_code(auth_code)
         query: dict[str, str] = {"code": code}
         if params.get("state"):
             query["state"] = params["state"]
@@ -149,7 +230,7 @@ class AuthubIdp:
 
     @cached_property
     def router(self) -> APIRouter:
-        router = APIRouter(tags=["dev-idp"])
+        router = APIRouter(tags=["authub-idp"])
 
         @router.get("/.well-known/openid-configuration")
         async def discovery() -> dict[str, Any]:
@@ -187,7 +268,7 @@ class AuthubIdp:
             if self.auto_login is not None:
                 user = await self._auto_login_user()
                 if user is not None:
-                    return self._issue_code_redirect(params, user)
+                    return await self._issue_code_redirect(params, user)
             action = str(request.url_for("AuthubIdp_login"))
             return HTMLResponse(_login_form(action, params, error=None))
 
@@ -201,14 +282,24 @@ class AuthubIdp:
                     {"error": "invalid_request", "error_description": error},
                     status_code=400,
                 )
-            user = await self.users.authenticate(form.get("username", ""), form.get("password", ""))
+            username = form.get("username", "")
+            self._evict_stale_lockouts()
+            if self._is_locked_out(username):
+                action = str(request.url_for("AuthubIdp_login"))
+                return HTMLResponse(
+                    _login_form(action, params, error="Too many attempts, try again later"),
+                    status_code=429,
+                )
+            user = await self.users.authenticate(username, form.get("password", ""))
             if user is None:
+                self._record_failure(username)
                 action = str(request.url_for("AuthubIdp_login"))
                 return HTMLResponse(
                     _login_form(action, params, error="Wrong username or password"),
                     status_code=401,
                 )
-            return self._issue_code_redirect(params, user)
+            self._clear_failures(username)
+            return await self._issue_code_redirect(params, user)
 
         @router.post("/token")
         async def token(request: Request) -> Response:
@@ -219,10 +310,9 @@ class AuthubIdp:
             if form.get("grant_type") != "authorization_code":
                 return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
-            auth_code = self._codes.pop(form.get("code", ""), None)
+            auth_code = await self._grants.consume_code(form.get("code", ""))
             if (
                 auth_code is None
-                or auth_code.expires_at <= int(time.time())
                 or auth_code.client_id != client.client_id
                 or auth_code.redirect_uri != form.get("redirect_uri", "")
             ):
@@ -237,7 +327,9 @@ class AuthubIdp:
                 return JSONResponse({"error": "invalid_grant"}, status_code=400)
 
             access_token = secrets.token_urlsafe(32)
-            self._access_tokens[access_token] = (user.sub, int(time.time()) + self._token_ttl)
+            await self._grants.save_access_token(
+                access_token, user.sub, int(time.time()) + self._token_ttl
+            )
             return JSONResponse(
                 {
                     "access_token": access_token,
@@ -252,8 +344,8 @@ class AuthubIdp:
         async def userinfo(request: Request) -> Response:
             header = request.headers.get("authorization", "")
             token_value = header[7:].strip() if header.lower().startswith("bearer ") else ""
-            entry = self._access_tokens.get(token_value)
-            if entry is None or entry[1] <= int(time.time()):
+            entry = await self._grants.get_access_token(token_value)
+            if entry is None:
                 return JSONResponse({"error": "invalid_token"}, status_code=401)
             user = await self.users.get_by_sub(entry[0])
             if user is None:

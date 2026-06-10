@@ -29,8 +29,8 @@ def test_github_is_oauth2_with_userinfo() -> None:
     assert presets.GITHUB_MAPPING.external_id == "id"
 
 
-def test_dev_idp_preset() -> None:
-    s = presets.dev_idp("http://testserver/idp", "cid", "cs")
+def test_authub_idp_preset() -> None:
+    s = presets.authub_idp("http://testserver/idp", "cid", "cs")
     assert isinstance(s, OidcSettings)
     assert str(s.issuer).rstrip("/") == "http://testserver/idp"
 
