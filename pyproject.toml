@@ -23,12 +23,12 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "fastapi>=0.115",
-  "pydantic[email]>=2.10",
+  "fastapi>=0.136",
+  "pydantic[email]>=2.13",
   "httpx>=0.28",
-  "authlib>=1.6",
-  "joserfc>=1.6",
-  "python-multipart>=0.0.9",
+  "authlib>=1.7",
+  "joserfc>=1.7",
+  "python-multipart>=0.0.32",
 ]
 
 [project.optional-dependencies]
