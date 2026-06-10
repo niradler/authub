@@ -14,7 +14,9 @@ from urllib.parse import unquote, urlencode
 
 from fastapi import APIRouter
 from joserfc import jwt
+from joserfc.errors import JoseError
 from joserfc.jwk import KeySet, KeySetSerialization, RSAKey
+from joserfc.jwt import JWTClaimsRegistry
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
@@ -83,6 +85,25 @@ def _login_form(action: str, params: dict[str, str], error: str | None) -> str:
     )
 
 
+def _consent_form(action: str, ticket: str, client_id: str, scopes: list[str]) -> str:
+    """Render the consent page showing the client and requested scopes.
+
+    The ticket is a short-lived signed JWT; it is the only state carried across
+    the form POST — no authorize params are repeated as plain hidden fields.
+    """
+    scope_items = "".join(f"<li>{html.escape(s)}</li>" for s in scopes)
+    return (
+        "<!doctype html><html><body><h1>authub IdP</h1>"
+        f"<p>The application <strong>{html.escape(client_id)}</strong> is requesting access.</p>"
+        f"<ul>{scope_items}</ul>"
+        f'<form method="post" action="{html.escape(action)}">'
+        f'<input type="hidden" name="ticket" value="{html.escape(ticket)}">'
+        '<button type="submit" name="decision" value="approve">Approve</button>'
+        '<button type="submit" name="decision" value="deny">Deny</button>'
+        "</form></body></html>"
+    )
+
+
 class AuthubIdp:
     """Embedded OIDC authorization server.
 
@@ -100,6 +121,7 @@ class AuthubIdp:
         grants: IdpGrantStore | None = None,
         signing_key: str | RSAKey | None = None,
         auto_login: str | None = None,
+        require_consent: bool = False,
         code_ttl_seconds: int = 60,
         token_ttl_seconds: int = 3600,
         refresh_token_ttl_seconds: int = 1209600,
@@ -116,6 +138,8 @@ class AuthubIdp:
             signing_key: PEM string or RSAKey for signing JWTs. None generates
                 an ephemeral key (restarts invalidate existing tokens).
             auto_login: Username to authenticate without showing the login form.
+            require_consent: When True, show a consent screen after successful
+                authentication before issuing an authorization code.
             code_ttl_seconds: Authorization code lifetime in seconds.
             token_ttl_seconds: Access/ID token lifetime in seconds.
             refresh_token_ttl_seconds: Refresh token lifetime in seconds. Defaults to 14 days.
@@ -128,6 +152,7 @@ class AuthubIdp:
         self._clients = {client.client_id: client for client in clients}
         self._key = self._resolve_signing_key(signing_key)
         self.auto_login = auto_login
+        self._require_consent = require_consent
         self._code_ttl = code_ttl_seconds
         self._token_ttl = token_ttl_seconds
         self._refresh_token_ttl = refresh_token_ttl_seconds
@@ -148,6 +173,45 @@ class AuthubIdp:
         if key.kid is None:
             key.ensure_kid()
         return key
+
+    def _make_consent_ticket(self, sub: str, params: dict[str, str]) -> str:
+        """Return a short-lived RS256 JWT carrying the authenticated subject and authorize params.
+
+        The ticket is the only state passed through the consent form — the /consent
+        handler reconstructs authorize params exclusively from this verified token.
+        """
+        now = int(time.time())
+        payload: dict[str, Any] = {
+            "iss": self.issuer,
+            "sub": sub,
+            "purpose": "consent",
+            "params": params,
+            "iat": now,
+            "exp": now + 300,
+        }
+        return jwt.encode(
+            {"alg": "RS256", "kid": self._key.kid}, payload, self._key, algorithms=["RS256"]
+        )
+
+    def _verify_consent_ticket(self, ticket: str) -> tuple[str, dict[str, str]] | None:
+        """Decode and verify a consent ticket.
+
+        Returns (sub, params) on success, None on any failure (bad signature,
+        wrong purpose, expired, or malformed).
+        """
+        try:
+            token = jwt.decode(ticket, self._key, algorithms=["RS256"])
+            JWTClaimsRegistry(exp={"essential": True}).validate(token.claims)
+        except JoseError:
+            return None
+        if token.claims.get("purpose") != "consent":
+            return None
+        raw_params = token.claims.get("params")
+        sub = token.claims.get("sub")
+        if not isinstance(sub, str) or not isinstance(raw_params, dict):
+            return None
+        params: dict[str, str] = {str(k): str(v) for k, v in raw_params.items()}
+        return sub, params
 
     def jwks(self) -> KeySetSerialization:
         """Return the public JWKS for this IdP."""
@@ -308,6 +372,14 @@ class AuthubIdp:
             if self.auto_login is not None:
                 user = await self._auto_login_user()
                 if user is not None:
+                    if self._require_consent:
+                        ticket = self._make_consent_ticket(user.sub, params)
+                        action = str(request.url_for("AuthubIdp_consent"))
+                        return HTMLResponse(
+                            _consent_form(
+                                action, ticket, params["client_id"], params["scope"].split()
+                            )
+                        )
                     return await self._issue_code_redirect(params, user)
             action = str(request.url_for("AuthubIdp_login"))
             return HTMLResponse(_login_form(action, params, error=None))
@@ -339,6 +411,38 @@ class AuthubIdp:
                     status_code=401,
                 )
             self._clear_failures(username)
+            if self._require_consent:
+                ticket = self._make_consent_ticket(user.sub, params)
+                action = str(request.url_for("AuthubIdp_consent"))
+                return HTMLResponse(
+                    _consent_form(action, ticket, params["client_id"], params["scope"].split())
+                )
+            return await self._issue_code_redirect(params, user)
+
+        @router.post("/consent", name="AuthubIdp_consent")
+        async def consent(request: Request) -> Response:
+            form = {k: str(v) for k, v in (await request.form()).items()}
+            ticket_str = form.get("ticket", "")
+            result = self._verify_consent_ticket(ticket_str)
+            if result is None:
+                return JSONResponse(
+                    {
+                        "error": "invalid_request",
+                        "error_description": "consent ticket invalid or expired",
+                    },
+                    status_code=400,
+                )
+            sub, params = result
+            if form.get("decision") != "approve":
+                query: dict[str, str] = {"error": "access_denied"}
+                if params.get("state"):
+                    query["state"] = params["state"]
+                return RedirectResponse(
+                    f"{params['redirect_uri']}?{urlencode(query)}", status_code=302
+                )
+            user = await self.users.get_by_sub(sub)
+            if user is None:
+                return JSONResponse({"error": "invalid_grant"}, status_code=400)
             return await self._issue_code_redirect(params, user)
 
         @router.post("/token")

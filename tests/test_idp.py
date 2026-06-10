@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import time
 
 import httpx
@@ -32,6 +33,7 @@ def make_idp(
     signing_key: str | RSAKey | None = None,
     max_login_attempts: int = 5,
     lockout_seconds: int = 300,
+    require_consent: bool = False,
 ) -> AuthubIdp:
     users = InMemoryIdpUserStore()
     users.add_user("alice", "wonderland", email="alice@acme.test", name="Alice")
@@ -46,6 +48,7 @@ def make_idp(
         signing_key=signing_key,
         max_login_attempts=max_login_attempts,
         lockout_seconds=lockout_seconds,
+        require_consent=require_consent,
     )
 
 
@@ -672,3 +675,156 @@ async def test_userinfo_profile_scope_adds_name() -> None:
     data = userinfo.json()
     assert data["email"] == "alice@acme.test"
     assert data["name"] == "Alice"
+
+
+# ---------------------------------------------------------------------------
+# Feature C: optional consent screen
+# ---------------------------------------------------------------------------
+
+
+def _extract_consent_ticket(html: str) -> str:
+    """Pull the ticket value out of the consent form hidden input."""
+    m = re.search(r'name="ticket"\s+value="([^"]+)"', html)
+    assert m is not None, "consent form has no ticket field"
+    return m.group(1)
+
+
+def _extract_form_action(html: str) -> str:
+    m = re.search(r'<form[^>]+action="([^"]+)"', html)
+    assert m is not None, "no form action found"
+    return m.group(1)
+
+
+async def test_consent_disabled_login_still_302s() -> None:
+    """Default (require_consent=False) preserves the existing redirect behaviour."""
+    async with make_client(make_idp()) as client:
+        r = await client.post(
+            "/idp/login",
+            data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wonderland"},
+        )
+    assert r.status_code == 302
+    assert r.headers["location"].startswith(REDIRECT)
+
+
+async def test_consent_login_returns_200_html_not_302() -> None:
+    """With require_consent=True a successful login shows the consent form, not a redirect."""
+    async with make_client(make_idp(require_consent=True)) as client:
+        r = await client.post(
+            "/idp/login",
+            data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wonderland"},
+        )
+    assert r.status_code == 200
+    assert "app" in r.text
+    for scope_token in AUTHORIZE_PARAMS["scope"].split():
+        assert scope_token in r.text
+    assert "location" not in r.headers
+
+
+async def test_consent_form_contains_ticket_and_client_id_and_scopes() -> None:
+    async with make_client(make_idp(require_consent=True)) as client:
+        r = await client.post(
+            "/idp/login",
+            data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wonderland"},
+        )
+    assert r.status_code == 200
+    assert "app" in r.text
+    assert "openid" in r.text
+    assert "email" in r.text
+    assert "profile" in r.text
+    ticket = _extract_consent_ticket(r.text)
+    assert len(ticket) > 20
+
+
+async def test_consent_approve_issues_exchangeable_code() -> None:
+    """Approving consent → 302 with code → exchangeable at /token."""
+    idp = make_idp(require_consent=True)
+    async with make_client(idp) as client:
+        login = await client.post(
+            "/idp/login",
+            data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wonderland"},
+        )
+        assert login.status_code == 200
+        ticket = _extract_consent_ticket(login.text)
+
+        consent = await client.post(
+            "/idp/consent",
+            data={"ticket": ticket, "decision": "approve"},
+        )
+    assert consent.status_code == 302
+    location = consent.headers["location"]
+    assert location.startswith(REDIRECT)
+    assert "code=" in location
+    assert "state=st1" in location
+
+    code = location.split("code=")[1].split("&")[0]
+    async with make_client(idp) as client2:
+        token_resp = await client2.post(
+            "/idp/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT,
+                "code_verifier": "v" * 43,
+                "client_id": "app",
+                "client_secret": "shh",
+            },
+        )
+    assert token_resp.status_code == 200
+    assert "id_token" in token_resp.json()
+
+
+async def test_consent_deny_redirects_with_access_denied_and_preserves_state() -> None:
+    async with make_client(make_idp(require_consent=True)) as client:
+        login = await client.post(
+            "/idp/login",
+            data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wonderland"},
+        )
+        ticket = _extract_consent_ticket(login.text)
+
+        deny = await client.post(
+            "/idp/consent",
+            data={"ticket": ticket, "decision": "deny"},
+        )
+    assert deny.status_code == 302
+    location = deny.headers["location"]
+    assert location.startswith(REDIRECT)
+    assert "error=access_denied" in location
+    assert "state=st1" in location
+    assert "code=" not in location
+
+
+async def test_consent_tampered_ticket_returns_400() -> None:
+    async with make_client(make_idp(require_consent=True)) as client:
+        r = await client.post(
+            "/idp/consent",
+            data={"ticket": "this.is.garbage", "decision": "approve"},
+        )
+    assert r.status_code == 400
+    assert r.json()["error"] == "invalid_request"
+
+
+async def test_consent_auto_login_shows_consent_form() -> None:
+    """With require_consent=True, auto_login triggers consent form instead of code redirect."""
+    async with make_client(make_idp(auto_login="alice", require_consent=True)) as client:
+        r = await client.get("/idp/authorize", params=AUTHORIZE_PARAMS, follow_redirects=False)
+    assert r.status_code == 200
+    assert "app" in r.text
+    ticket = _extract_consent_ticket(r.text)
+    assert len(ticket) > 20
+
+
+async def test_consent_auto_login_approve_gives_code() -> None:
+    idp = make_idp(auto_login="alice", require_consent=True)
+    async with make_client(idp) as client:
+        authorize = await client.get(
+            "/idp/authorize", params=AUTHORIZE_PARAMS, follow_redirects=False
+        )
+        assert authorize.status_code == 200
+        ticket = _extract_consent_ticket(authorize.text)
+
+        consent = await client.post(
+            "/idp/consent",
+            data={"ticket": ticket, "decision": "approve"},
+        )
+    assert consent.status_code == 302
+    assert "code=" in consent.headers["location"]
