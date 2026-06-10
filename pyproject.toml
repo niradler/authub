@@ -26,16 +26,19 @@ dependencies = [
   "fastapi>=0.115",
   "pydantic[email]>=2.10",
   "httpx>=0.28",
-  "authlib>=1.3",
-  "joserfc>=1.0",
+  "authlib>=1.6",
+  "joserfc>=1.6",
   "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
 saml = ["pysaml2>=7.5"]
+all = ["pysaml2>=7.5"]
 
 [project.urls]
 Homepage = "https://github.com/niradler/authub"
+Source = "https://github.com/niradler/authub"
+Issues = "https://github.com/niradler/authub/issues"
 
 [dependency-groups]
 dev = [

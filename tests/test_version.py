@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from authub import __version__, get_version
+from importlib import metadata
+
+import authub
 
 
 def test_version_matches() -> None:
-    assert get_version() == __version__ == "0.1.0"
+    assert authub.__version__ == metadata.version("authub")

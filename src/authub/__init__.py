@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from importlib import metadata
+
 from authub.errors import AuthubError
 from authub.hub import Authub
 from authub.mapping import Mapper, register_transform
@@ -21,12 +23,10 @@ from authub.models import (
 )
 from authub.plugins import Plugin
 
-__version__ = "0.1.0"
-
-
-def get_version() -> str:
-    return __version__
-
+try:
+    __version__ = metadata.version("authub")
+except metadata.PackageNotFoundError:
+    __version__ = "0.0.0"
 
 __all__ = [
     "Authub",
@@ -46,7 +46,6 @@ __all__ = [
     "SamlSettings",
     "SessionCookieConfig",
     "TokenClaims",
-    "get_version",
     "register_settings",
     "register_transform",
 ]
