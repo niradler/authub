@@ -2,25 +2,25 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from authub.models import CanonicalIdentity, Connection, ConnectionInfo, Principal
+from authub.models import CanonicalIdentity, IdentityProvider, IdentityProviderInfo, Principal
 
 
-class ConnectionStore(ABC):
-    """Abstract store for ``Connection`` configuration objects."""
+class IdentityProviderStore(ABC):
+    """Abstract store for ``IdentityProvider`` configuration objects."""
 
     @abstractmethod
-    async def get(self, connection_id: str) -> Connection:
-        """Return the connection by ID. Raise ``ConnectionNotFoundError`` when absent."""
+    async def get(self, idp_id: str) -> IdentityProvider:
+        """Return the identity provider by ID. Raise ``IdentityProviderNotFoundError`` if absent."""
         ...
 
     @abstractmethod
-    async def list_for_tenant(self, tenant_id: str) -> list[Connection]:
-        """Return all connections belonging to a tenant."""
+    async def list_for_tenant(self, tenant_id: str) -> list[IdentityProvider]:
+        """Return all identity providers belonging to a tenant."""
         ...
 
     @abstractmethod
-    async def list_for_email(self, email: str) -> list[ConnectionInfo]:
-        """Return public ``ConnectionInfo`` records matched by the email's domain."""
+    async def list_for_email(self, email: str) -> list[IdentityProviderInfo]:
+        """Return public ``IdentityProviderInfo`` records matched by the email's domain."""
         ...
 
 

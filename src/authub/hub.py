@@ -19,7 +19,7 @@ from authub.protocols.base import HttpOptions, ProtocolRegistry
 from authub.protocols.oauth2 import OAuth2Protocol
 from authub.protocols.oidc import OidcProtocol
 from authub.state import FlowStateCodec
-from authub.stores.base import ConnectionStore, UserStore
+from authub.stores.base import IdentityProviderStore, UserStore
 from authub.stores.memory import InMemoryUserStore
 from authub.tokens.base import RevocationStore, TokenService
 from authub.tokens.claims import build_service_claims
@@ -40,7 +40,7 @@ class Authub:
     Wire it once, then call ``attach`` or use the ``router`` property.
 
     Args:
-        connections: Store of ``Connection`` records (required).
+        identity_providers: Store of ``IdentityProvider`` records (required).
         tokens: JWT signing/verification service (required).
         state_secret: Symmetric secret for login-flow state cookies; at least 32 characters.
         users: User store; defaults to ``InMemoryUserStore`` when omitted.
@@ -56,7 +56,7 @@ class Authub:
     def __init__(
         self,
         *,
-        connections: ConnectionStore,
+        identity_providers: IdentityProviderStore,
         tokens: TokenService,
         state_secret: str | SecretStr,
         users: UserStore | None = None,
@@ -68,7 +68,7 @@ class Authub:
         session_cookie: SessionCookieConfig | None = None,
         public_base_url: str | None = None,
     ) -> None:
-        self.connections = connections
+        self.identity_providers = identity_providers
         self.tokens = tokens
         self.users = users if users is not None else InMemoryUserStore()
         self.email = email if email is not None else ConsoleEmailSender()
@@ -86,7 +86,7 @@ class Authub:
         self._register_saml()
 
         self.flow = AuthFlow(
-            connections=self.connections,
+            identity_providers=self.identity_providers,
             users=self.users,
             tokens=self.tokens,
             registry=self.registry,

@@ -7,7 +7,7 @@ Typed, composable authentication hub for FastAPI.
 - OAuth2 and OIDC SP (Google, GitHub, Okta, Auth0, Entra, GitLab, and any standard provider)
 - SAML 2.0 SP (requires `pysaml2` and `xmlsec1`)
 - User and service JWTs with pluggable signing (HS256, Ed25519)
-- Pluggable stores (user store, connection store, revocation store) and email senders
+- Pluggable stores (user store, identity provider store, revocation store) and email senders
 - Plugin hooks for identity normalization, user provisioning, and token issuance
 - Embedded OIDC IdP (`authub.idp.AuthubIdp`) — a production-grade OIDC provider with injectable signing keys and pluggable stores
 
@@ -34,14 +34,14 @@ pip install "authub[all]"
 ```python
 from fastapi import FastAPI
 
-from authub import Authub, Connection
+from authub import Authub, IdentityProvider
 from authub.presets import oidc
-from authub.stores.memory import InMemoryConnectionStore
+from authub.stores.memory import InMemoryIdentityProviderStore
 from authub.tokens.jwt import JwtTokenService
 
-connections = InMemoryConnectionStore(
-    connections=[
-        Connection(
+identity_providers = InMemoryIdentityProviderStore(
+    identity_providers=[
+        IdentityProvider(
             id="google",
             tenant_id="acme",
             display_name="Google",
@@ -57,7 +57,7 @@ connections = InMemoryConnectionStore(
 tokens = JwtTokenService.hs256(secret="change-me-to-a-32-char-secret!!")
 
 auth = Authub(
-    connections=connections,
+    identity_providers=identity_providers,
     tokens=tokens,
     state_secret="another-secret-at-least-32-chars",
 )
@@ -68,22 +68,22 @@ auth.attach(app)
 
 After `auth.attach(app)`, the following routes are registered under `/auth`:
 
-- `GET /auth/{connection_id}/login` — start the OAuth2/OIDC/SAML flow
-- `GET|POST /auth/{connection_id}/callback` — receive the IdP callback (POST is for SAML ACS)
-- `GET /auth/discover` — list connections for an email address
+- `GET /auth/{idp_id}/login` — start the OAuth2/OIDC/SAML flow
+- `GET|POST /auth/{idp_id}/callback` — receive the IdP callback (POST is for SAML ACS)
+- `GET /auth/discover` — list identity providers for an email address
 - `POST /auth/logout` — revoke the current token (if revocation store configured)
 
 To verify a token programmatically: `claims = await hub.verify_token(token)`
 
-## Connections
+## Identity Providers
 
-A `Connection` binds a tenant to one IdP: it carries the protocol settings and an optional claim mapping.
+An `IdentityProvider` binds a tenant to one IdP: it carries the protocol settings and an optional claim mapping.
 
 ```python
-from authub import Connection
+from authub import IdentityProvider
 from authub.presets import oidc, oauth2
 
-oidc_conn = Connection(
+oidc_idp = IdentityProvider(
     id="okta",
     tenant_id="acme",
     display_name="Okta",
@@ -94,7 +94,7 @@ oidc_conn = Connection(
     ),
 )
 
-github_conn = Connection(
+github_idp = IdentityProvider(
     id="github",
     tenant_id="acme",
     display_name="GitHub",
@@ -151,7 +151,7 @@ class TenantClaimPlugin(Plugin):
 
 Available hooks:
 
-- `on_identity(raw, conn)` — called with raw IdP claims before normalization
+- `on_identity(raw, idp)` — called with raw IdP claims before normalization
 - `on_user_provisioned(principal, identity)` — called when a new user is created
 - `before_issue_token(claims, principal, identity)` — mutate JWT payload before signing
 - `on_token_verify(claims)` — called on every successful token verification
@@ -180,10 +180,10 @@ import os
 from fastapi import FastAPI
 from pydantic import SecretStr
 
-from authub import Authub, Connection
+from authub import Authub, IdentityProvider
 from authub.idp import AuthubIdp, IdpClient, InMemoryIdpUserStore
 from authub.presets import authub_idp
-from authub.stores.memory import InMemoryConnectionStore
+from authub.stores.memory import InMemoryIdentityProviderStore
 from authub.tokens.jwt import JwtTokenService
 
 IDP_ISSUER = "https://auth.example.com/idp"
@@ -206,9 +206,9 @@ idp = AuthubIdp(
     signing_key=os.environ["IDP_SIGNING_KEY_PEM"],
 )
 
-connections = InMemoryConnectionStore(
-    connections=[
-        Connection(
+identity_providers = InMemoryIdentityProviderStore(
+    identity_providers=[
+        IdentityProvider(
             id="myidp",
             tenant_id="acme",
             display_name="authub IdP",
@@ -222,7 +222,7 @@ connections = InMemoryConnectionStore(
 )
 
 auth = Authub(
-    connections=connections,
+    identity_providers=identity_providers,
     tokens=JwtTokenService.hs256(secret="secret-must-be-32-chars-long!!!"),
     state_secret="state-secret-must-be-32-chars!!",
 )
@@ -239,10 +239,10 @@ Install `authub[saml]` and ensure `xmlsec1` is on your `PATH` (available via OS 
 ```python
 from pydantic import AnyHttpUrl
 
-from authub import Connection
+from authub import IdentityProvider
 from authub.models import SamlSettings
 
-saml_conn = Connection(
+saml_idp = IdentityProvider(
     id="corp-saml",
     tenant_id="acme",
     display_name="Corporate SSO",

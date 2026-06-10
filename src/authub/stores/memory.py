@@ -3,50 +3,56 @@ from __future__ import annotations
 from collections.abc import Iterable
 from uuid import uuid4
 
-from authub.errors import ConnectionNotFoundError
-from authub.models import CanonicalIdentity, Connection, ConnectionInfo, Principal, PrincipalType
-from authub.stores.base import ConnectionStore, UserStore
+from authub.errors import IdentityProviderNotFoundError
+from authub.models import (
+    CanonicalIdentity,
+    IdentityProvider,
+    IdentityProviderInfo,
+    Principal,
+    PrincipalType,
+)
+from authub.stores.base import IdentityProviderStore, UserStore
 
 
-class InMemoryConnectionStore(ConnectionStore):
-    """In-process connection store. Suitable for tests and single-process deployments.
+class InMemoryIdentityProviderStore(IdentityProviderStore):
+    """In-process identity provider store. Suitable for tests and single-process deployments.
 
     Args:
-        connections: Initial ``Connection`` objects to register.
+        identity_providers: Initial ``IdentityProvider`` objects to register.
         domains: Mapping of email domain (lower-cased) to ``tenant_id`` for discovery lookups.
     """
 
     def __init__(
         self,
-        connections: Iterable[Connection] = (),
+        identity_providers: Iterable[IdentityProvider] = (),
         domains: dict[str, str] | None = None,
     ) -> None:
-        self._by_id: dict[str, Connection] = {}
+        self._by_id: dict[str, IdentityProvider] = {}
         self._domains: dict[str, str] = {k.lower(): v for k, v in (domains or {}).items()}
-        for conn in connections:
-            self._by_id[conn.id] = conn
+        for idp in identity_providers:
+            self._by_id[idp.id] = idp
 
-    def add(self, connection: Connection) -> None:
-        """Register or replace a connection at runtime."""
-        self._by_id[connection.id] = connection
+    def add(self, identity_provider: IdentityProvider) -> None:
+        """Register or replace an identity provider at runtime."""
+        self._by_id[identity_provider.id] = identity_provider
 
-    async def get(self, connection_id: str) -> Connection:
-        conn = self._by_id.get(connection_id)
-        if conn is None:
-            raise ConnectionNotFoundError()
-        return conn
+    async def get(self, idp_id: str) -> IdentityProvider:
+        idp = self._by_id.get(idp_id)
+        if idp is None:
+            raise IdentityProviderNotFoundError()
+        return idp
 
-    async def list_for_tenant(self, tenant_id: str) -> list[Connection]:
+    async def list_for_tenant(self, tenant_id: str) -> list[IdentityProvider]:
         return [c for c in self._by_id.values() if c.tenant_id == tenant_id]
 
-    async def list_for_email(self, email: str) -> list[ConnectionInfo]:
+    async def list_for_email(self, email: str) -> list[IdentityProviderInfo]:
         domain = email.lower().split("@", 1)[-1]
         tenant_id = self._domains.get(domain)
         if tenant_id is None:
             return []
         return [
-            ConnectionInfo(
-                connection_id=c.id,
+            IdentityProviderInfo(
+                idp_id=c.id,
                 display_name=c.display_name,
                 kind=c.settings.kind,
             )

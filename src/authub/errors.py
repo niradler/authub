@@ -23,20 +23,23 @@ class ConfigurationError(AuthubError):
     default_detail = "Authub is misconfigured"
 
 
-class ConnectionNotFoundError(AuthubError):
-    """Raised when a connection ID does not exist in the store. HTTP 404."""
+class IdentityProviderNotFoundError(AuthubError):
+    """Raised when an identity provider ID does not exist in the store. HTTP 404."""
 
-    code = "connection_not_found"
+    code = "identity_provider_not_found"
     status_code = 404
-    default_detail = "Unknown connection"
+    default_detail = "Unknown identity provider"
 
 
 class UnknownProtocolError(AuthubError):
-    """Raised when a connection references a protocol kind with no registered handler. HTTP 500."""
+    """Raised when an identity provider references a protocol kind with no registered handler.
+
+    HTTP 500.
+    """
 
     code = "unknown_protocol"
     status_code = 500
-    default_detail = "No protocol registered for this connection"
+    default_detail = "No protocol registered for this identity provider"
 
 
 class InvalidStateError(AuthubError):

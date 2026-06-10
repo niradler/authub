@@ -7,7 +7,7 @@ from authlib.integrations.httpx_client import AsyncOAuth2Client
 from starlette.requests import Request
 
 from authub.errors import InvalidStateError, ProtocolError
-from authub.models import Connection, OAuth2Settings, RawIdentity
+from authub.models import IdentityProvider, OAuth2Settings, RawIdentity
 from authub.protocols.base import AuthProtocol, HttpOptions
 from authub.state import BeginResult, FlowState
 
@@ -31,8 +31,10 @@ class OAuth2Protocol(AuthProtocol):
             timeout=self._http.timeout,
         )
 
-    async def begin(self, *, conn: Connection, callback_url: str, return_to: str) -> BeginResult:
-        settings = cast(OAuth2Settings, conn.settings)
+    async def begin(
+        self, *, idp: IdentityProvider, callback_url: str, return_to: str
+    ) -> BeginResult:
+        settings = cast(OAuth2Settings, idp.settings)
         state = secrets.token_urlsafe(24)
         code_verifier = secrets.token_urlsafe(48)
         client = self._client(settings, callback_url)
@@ -42,7 +44,7 @@ class OAuth2Protocol(AuthProtocol):
         return BeginResult(
             redirect_url=url,
             flow_state=FlowState(
-                connection_id=conn.id,
+                idp_id=idp.id,
                 return_to=return_to,
                 state=state,
                 code_verifier=code_verifier,
@@ -53,11 +55,11 @@ class OAuth2Protocol(AuthProtocol):
         self,
         *,
         request: Request,
-        conn: Connection,
+        idp: IdentityProvider,
         callback_url: str,
         flow_state: FlowState,
     ) -> RawIdentity:
-        settings = cast(OAuth2Settings, conn.settings)
+        settings = cast(OAuth2Settings, idp.settings)
         params = request.query_params
         if "error" in params:
             raise ProtocolError(f"identity provider returned error: {params['error']}")

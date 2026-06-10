@@ -12,7 +12,7 @@ from joserfc.jwk import KeySet
 from starlette.requests import Request
 
 from authub.errors import InvalidStateError, ProtocolError
-from authub.models import Connection, OidcSettings, RawIdentity
+from authub.models import IdentityProvider, OidcSettings, RawIdentity
 from authub.protocols.base import AuthProtocol, HttpOptions
 from authub.state import BeginResult, FlowState
 
@@ -78,8 +78,10 @@ class OidcProtocol(AuthProtocol):
             timeout=self._http.timeout,
         )
 
-    async def begin(self, *, conn: Connection, callback_url: str, return_to: str) -> BeginResult:
-        settings = cast(OidcSettings, conn.settings)
+    async def begin(
+        self, *, idp: IdentityProvider, callback_url: str, return_to: str
+    ) -> BeginResult:
+        settings = cast(OidcSettings, idp.settings)
         metadata = await self._discover(str(settings.issuer))
         state = secrets.token_urlsafe(24)
         nonce = secrets.token_urlsafe(24)
@@ -94,7 +96,7 @@ class OidcProtocol(AuthProtocol):
         return BeginResult(
             redirect_url=url,
             flow_state=FlowState(
-                connection_id=conn.id,
+                idp_id=idp.id,
                 return_to=return_to,
                 state=state,
                 nonce=nonce,
@@ -106,11 +108,11 @@ class OidcProtocol(AuthProtocol):
         self,
         *,
         request: Request,
-        conn: Connection,
+        idp: IdentityProvider,
         callback_url: str,
         flow_state: FlowState,
     ) -> RawIdentity:
-        settings = cast(OidcSettings, conn.settings)
+        settings = cast(OidcSettings, idp.settings)
         params = request.query_params
         if "error" in params:
             raise ProtocolError(f"identity provider returned error: {params['error']}")

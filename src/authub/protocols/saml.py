@@ -10,7 +10,7 @@ from saml2.config import SPConfig
 from starlette.requests import Request
 
 from authub.errors import ConfigurationError, InvalidStateError, ProtocolError
-from authub.models import Connection, RawIdentity, SamlSettings
+from authub.models import IdentityProvider, RawIdentity, SamlSettings
 from authub.protocols.base import AuthProtocol
 from authub.state import BeginResult, FlowState
 
@@ -63,14 +63,16 @@ class SamlProtocol(AuthProtocol):
     def _acs_url(settings: SamlSettings, callback_url: str) -> str:
         return str(settings.acs_url) if settings.acs_url is not None else callback_url
 
-    async def begin(self, *, conn: Connection, callback_url: str, return_to: str) -> BeginResult:
-        settings = cast(SamlSettings, conn.settings)
+    async def begin(
+        self, *, idp: IdentityProvider, callback_url: str, return_to: str
+    ) -> BeginResult:
+        settings = cast(SamlSettings, idp.settings)
         acs_url = self._acs_url(settings, callback_url)
         async with self._semaphore:
             request_id, redirect_url = await asyncio.to_thread(self._begin_sync, settings, acs_url)
         return BeginResult(
             redirect_url=redirect_url,
-            flow_state=FlowState(connection_id=conn.id, return_to=return_to, request_id=request_id),
+            flow_state=FlowState(idp_id=idp.id, return_to=return_to, request_id=request_id),
         )
 
     def _begin_sync(self, settings: SamlSettings, acs_url: str) -> tuple[str, str]:
@@ -99,11 +101,11 @@ class SamlProtocol(AuthProtocol):
         self,
         *,
         request: Request,
-        conn: Connection,
+        idp: IdentityProvider,
         callback_url: str,
         flow_state: FlowState,
     ) -> RawIdentity:
-        settings = cast(SamlSettings, conn.settings)
+        settings = cast(SamlSettings, idp.settings)
         if not flow_state.request_id:
             raise InvalidStateError("missing SAML request id in login state")
         form = await request.form()

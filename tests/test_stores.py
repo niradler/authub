@@ -3,15 +3,15 @@ from __future__ import annotations
 import pytest
 from pydantic import AnyHttpUrl, SecretStr, TypeAdapter
 
-from authub.errors import ConnectionNotFoundError
-from authub.models import CanonicalIdentity, Connection, OidcSettings, PrincipalType
-from authub.stores.memory import InMemoryConnectionStore, InMemoryUserStore
+from authub.errors import IdentityProviderNotFoundError
+from authub.models import CanonicalIdentity, IdentityProvider, OidcSettings, PrincipalType
+from authub.stores.memory import InMemoryIdentityProviderStore, InMemoryUserStore
 
 _url = TypeAdapter(AnyHttpUrl)
 
 
-def make_conn(conn_id: str = "acme-google", tenant: str = "acme") -> Connection:
-    return Connection(
+def make_conn(conn_id: str = "acme-google", tenant: str = "acme") -> IdentityProvider:
+    return IdentityProvider(
         id=conn_id,
         tenant_id=tenant,
         display_name="Google",
@@ -24,19 +24,19 @@ def make_conn(conn_id: str = "acme-google", tenant: str = "acme") -> Connection:
 
 
 async def test_connection_get_and_missing() -> None:
-    store = InMemoryConnectionStore([make_conn()])
+    store = InMemoryIdentityProviderStore([make_conn()])
     conn = await store.get("acme-google")
     assert conn.tenant_id == "acme"
-    with pytest.raises(ConnectionNotFoundError):
+    with pytest.raises(IdentityProviderNotFoundError):
         await store.get("nope")
 
 
 async def test_discovery_by_email_domain() -> None:
-    store = InMemoryConnectionStore(
+    store = InMemoryIdentityProviderStore(
         [make_conn(), make_conn("acme-okta")], domains={"acme.com": "acme"}
     )
     infos = await store.list_for_email("Ada@ACME.com")
-    assert {i.connection_id for i in infos} == {"acme-google", "acme-okta"}
+    assert {i.idp_id for i in infos} == {"acme-google", "acme-okta"}
     assert infos[0].kind == "oidc"
     assert await store.list_for_email("who@unknown.io") == []
 

@@ -14,7 +14,7 @@ from pydantic import (
     model_validator,
 )
 
-CONNECTION_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
+IDP_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 
 
 class PrincipalType(StrEnum):
@@ -63,7 +63,7 @@ class Mapping(BaseModel):
 
 
 class ProtocolSettings(BaseModel):
-    """Base for per-protocol connection settings. Subclass + @register_settings to extend."""
+    """Base for per-protocol identity provider settings. Subclass + @register_settings to extend."""
 
     kind: str
 
@@ -121,10 +121,10 @@ class SamlSettings(ProtocolSettings):
         return self
 
 
-class Connection(BaseModel):
+class IdentityProvider(BaseModel):
     """One configured IdP for a tenant: protocol + settings + claim mapping."""
 
-    id: str = Field(pattern=CONNECTION_ID_PATTERN)  # path-safe: used in /auth/{id}/login
+    id: str = Field(pattern=IDP_ID_PATTERN)
     tenant_id: str
     display_name: str
     settings: SerializeAsAny[ProtocolSettings]
@@ -146,10 +146,10 @@ class Connection(BaseModel):
         return value
 
 
-class ConnectionInfo(BaseModel):
+class IdentityProviderInfo(BaseModel):
     """Public discovery shape - uniform regardless of protocol (anti-enumeration)."""
 
-    connection_id: str
+    idp_id: str
     display_name: str
     kind: str
 

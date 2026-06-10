@@ -7,7 +7,7 @@ import httpx
 from starlette.requests import Request
 
 from authub.errors import UnknownProtocolError
-from authub.models import Connection, RawIdentity
+from authub.models import IdentityProvider, RawIdentity
 from authub.state import BeginResult, FlowState
 
 
@@ -48,7 +48,7 @@ class AuthProtocol(ABC):
     async def begin(
         self,
         *,
-        conn: Connection,
+        idp: IdentityProvider,
         callback_url: str,
         return_to: str,
     ) -> BeginResult:
@@ -60,7 +60,7 @@ class AuthProtocol(ABC):
         self,
         *,
         request: Request,
-        conn: Connection,
+        idp: IdentityProvider,
         callback_url: str,
         flow_state: FlowState,
     ) -> RawIdentity:

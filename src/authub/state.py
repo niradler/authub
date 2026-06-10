@@ -16,10 +16,10 @@ _STATE_TYP = "authub-state+jwt"
 class FlowState(BaseModel):
     """Transient per-login state persisted in a short-lived HttpOnly cookie.
 
-    Carries connection, PKCE, nonce, and return-to data between the login and callback steps.
+    Carries identity provider, PKCE, nonce, and return-to data between the login and callback steps.
     """
 
-    connection_id: str
+    idp_id: str
     return_to: str = "/"
     state: str | None = None
     nonce: str | None = None

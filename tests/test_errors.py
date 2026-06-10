@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from authub.errors import (
     AuthubError,
-    ConnectionNotFoundError,
+    IdentityProviderNotFoundError,
     InvalidStateError,
     InvalidTokenError,
     MappingError,
@@ -12,8 +12,8 @@ from authub.errors import (
 
 
 def test_error_defaults() -> None:
-    err = ConnectionNotFoundError()
-    assert err.code == "connection_not_found"
+    err = IdentityProviderNotFoundError()
+    assert err.code == "identity_provider_not_found"
     assert err.status_code == 404
     assert isinstance(err, AuthubError)
     assert str(err) == err.detail

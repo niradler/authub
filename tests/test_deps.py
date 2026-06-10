@@ -13,7 +13,7 @@ from authub.models import (
     PrincipalType,
     SessionCookieConfig,
 )
-from authub.stores.memory import InMemoryConnectionStore
+from authub.stores.memory import InMemoryIdentityProviderStore
 from authub.tokens.claims import build_user_claims
 from authub.tokens.jwt import JwtTokenService
 
@@ -22,7 +22,7 @@ SECRET = "s" * 32
 
 def make_app(session_cookie: SessionCookieConfig | None = None) -> tuple[FastAPI, Authub]:
     hub = Authub(
-        connections=InMemoryConnectionStore(),
+        identity_providers=InMemoryIdentityProviderStore(),
         tokens=JwtTokenService.hs256(SECRET),
         state_secret="x" * 32,
         session_cookie=session_cookie,

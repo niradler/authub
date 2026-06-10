@@ -7,7 +7,7 @@ import pytest
 from authub.errors import ForbiddenError, TokenRevokedError
 from authub.hub import Authub
 from authub.models import Principal, PrincipalType
-from authub.stores.memory import InMemoryConnectionStore
+from authub.stores.memory import InMemoryIdentityProviderStore
 from authub.tokens.base import InMemoryRevocationStore
 from authub.tokens.jwt import JwtTokenService
 
@@ -16,7 +16,7 @@ SECRET = "s" * 32
 
 def make_hub(**kwargs: object) -> Authub:
     return Authub(
-        connections=InMemoryConnectionStore(),
+        identity_providers=InMemoryIdentityProviderStore(),
         tokens=JwtTokenService.hs256(SECRET),
         state_secret="x" * 32,
         **kwargs,  # type: ignore[arg-type]

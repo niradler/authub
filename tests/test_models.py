@@ -5,7 +5,7 @@ from pydantic import AnyHttpUrl, SecretStr, TypeAdapter, ValidationError
 
 from authub.models import (
     CanonicalIdentity,
-    Connection,
+    IdentityProvider,
     Mapping,
     OidcSettings,
     Principal,
@@ -35,7 +35,7 @@ def test_oidc_settings_defaults() -> None:
 
 
 def test_connection_resolves_settings_from_dict() -> None:
-    conn = Connection.model_validate(
+    conn = IdentityProvider.model_validate(
         {
             "id": "acme-google",
             "tenant_id": "acme",
@@ -53,7 +53,7 @@ def test_connection_resolves_settings_from_dict() -> None:
 
 def test_connection_rejects_unknown_kind() -> None:
     with pytest.raises(ValidationError, match="unknown protocol kind"):
-        Connection.model_validate(
+        IdentityProvider.model_validate(
             {
                 "id": "x",
                 "tenant_id": "t",
@@ -64,18 +64,18 @@ def test_connection_rejects_unknown_kind() -> None:
 
 
 def test_connection_roundtrip_serializes_subclass_fields() -> None:
-    conn = Connection(
+    conn = IdentityProvider(
         id="c1", tenant_id="t", display_name="C", settings=make_oidc(), mapping=Mapping()
     )
     dumped = conn.model_dump(mode="json")
     assert dumped["settings"]["issuer"].rstrip("/") == "https://accounts.google.com"
-    again = Connection.model_validate(dumped)
+    again = IdentityProvider.model_validate(dumped)
     assert isinstance(again.settings, OidcSettings)
 
 
 def test_connection_id_pattern() -> None:
     with pytest.raises(ValidationError):
-        Connection(id="Bad/Id", tenant_id="t", display_name="x", settings=make_oidc())
+        IdentityProvider(id="Bad/Id", tenant_id="t", display_name="x", settings=make_oidc())
 
 
 def test_custom_settings_registration() -> None:
@@ -84,7 +84,7 @@ def test_custom_settings_registration() -> None:
         kind: str = "magic"
         wand: str
 
-    conn = Connection.model_validate(
+    conn = IdentityProvider.model_validate(
         {
             "id": "m1",
             "tenant_id": "t",

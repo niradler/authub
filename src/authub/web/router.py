@@ -9,7 +9,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from authub.errors import AuthubError, InvalidStateError
-from authub.models import ConnectionInfo
+from authub.models import IdentityProviderInfo
 from authub.state import STATE_COOKIE
 from authub.web.deps import extract_token
 
@@ -23,8 +23,8 @@ def sanitize_return_to(value: str) -> str:
     return value
 
 
-def callback_url_for(request: Request, hub: Authub, connection_id: str) -> str:
-    url = str(request.url_for("authub_callback", connection_id=connection_id))
+def callback_url_for(request: Request, hub: Authub, idp_id: str) -> str:
+    url = str(request.url_for("authub_callback", idp_id=idp_id))
     if hub.public_base_url is not None:
         parts = urlsplit(url)
         base = urlsplit(hub.public_base_url)
@@ -49,17 +49,17 @@ def build_router(hub: Authub) -> APIRouter:
     router = APIRouter(tags=["auth"])
 
     @router.get("/discover")
-    async def discover(email: str) -> dict[str, list[ConnectionInfo]]:
+    async def discover(email: str) -> dict[str, list[IdentityProviderInfo]]:
         parts = email.split("@", 1)
         if len(parts) != 2 or not parts[0] or not parts[1]:
-            return {"connections": []}
-        return {"connections": await hub.connections.list_for_email(email)}
+            return {"identity_providers": []}
+        return {"identity_providers": await hub.identity_providers.list_for_email(email)}
 
-    @router.get("/{connection_id}/login", name="authub_login")
-    async def login(request: Request, connection_id: str, return_to: str = "/") -> Response:
+    @router.get("/{idp_id}/login", name="authub_login")
+    async def login(request: Request, idp_id: str, return_to: str = "/") -> Response:
         result = await hub.flow.begin(
-            connection_id=connection_id,
-            callback_url=callback_url_for(request, hub, connection_id),
+            idp_id=idp_id,
+            callback_url=callback_url_for(request, hub, idp_id),
             return_to=sanitize_return_to(return_to),
         )
         response: Response = RedirectResponse(result.redirect_url, status_code=302)
@@ -75,18 +75,18 @@ def build_router(hub: Authub) -> APIRouter:
         )
         return response
 
-    @router.api_route("/{connection_id}/callback", methods=["GET", "POST"], name="authub_callback")
-    async def callback(request: Request, connection_id: str) -> Response:
+    @router.api_route("/{idp_id}/callback", methods=["GET", "POST"], name="authub_callback")
+    async def callback(request: Request, idp_id: str) -> Response:
         raw_state = request.cookies.get(STATE_COOKIE)
         if not raw_state:
             raise InvalidStateError("login state cookie is missing or expired")
         flow_state = hub.state_codec.decode(raw_state)
-        if flow_state.connection_id != connection_id:
-            raise InvalidStateError("state was issued for a different connection")
+        if flow_state.idp_id != idp_id:
+            raise InvalidStateError("state was issued for a different identity provider")
         token, _principal = await hub.flow.complete(
             request=request,
-            connection_id=connection_id,
-            callback_url=callback_url_for(request, hub, connection_id),
+            idp_id=idp_id,
+            callback_url=callback_url_for(request, hub, idp_id),
             flow_state=flow_state,
         )
         config = hub.session_cookie

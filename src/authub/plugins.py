@@ -4,7 +4,13 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from authub.models import CanonicalIdentity, Connection, Principal, RawIdentity, TokenClaims
+    from authub.models import (
+        CanonicalIdentity,
+        IdentityProvider,
+        Principal,
+        RawIdentity,
+        TokenClaims,
+    )
 
 
 class Plugin:
@@ -13,7 +19,7 @@ class Plugin:
     Raising any exception from a hook propagates to the caller and aborts the current operation.
     """
 
-    async def on_identity(self, raw: RawIdentity, conn: Connection) -> None:
+    async def on_identity(self, raw: RawIdentity, idp: IdentityProvider) -> None:
         """Called after the IdP callback is parsed but before claim mapping.
 
         Use to inspect or reject raw IdP claims. Raise to block the login.
@@ -51,10 +57,10 @@ class PluginChain:
     def __init__(self, plugins: Sequence[Plugin] = ()) -> None:
         self._plugins = list(plugins)
 
-    async def on_identity(self, raw: RawIdentity, conn: Connection) -> None:
+    async def on_identity(self, raw: RawIdentity, idp: IdentityProvider) -> None:
         """Invoke ``on_identity`` on each plugin in registration order."""
         for plugin in self._plugins:
-            await plugin.on_identity(raw, conn)
+            await plugin.on_identity(raw, idp)
 
     async def on_user_provisioned(self, principal: Principal, identity: CanonicalIdentity) -> None:
         """Invoke ``on_user_provisioned`` on each plugin in registration order."""

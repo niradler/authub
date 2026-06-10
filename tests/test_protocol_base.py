@@ -15,14 +15,14 @@ def test_registry_get_unknown_raises() -> None:
 def test_registry_register_and_get() -> None:
     from starlette.requests import Request
 
-    from authub.models import Connection, RawIdentity
+    from authub.models import IdentityProvider, RawIdentity
     from authub.state import BeginResult, FlowState
 
     class Fake(AuthProtocol):
         kind = "fake"
 
         async def begin(
-            self, *, conn: Connection, callback_url: str, return_to: str
+            self, *, idp: IdentityProvider, callback_url: str, return_to: str
         ) -> BeginResult:
             raise NotImplementedError
 
@@ -30,7 +30,7 @@ def test_registry_register_and_get() -> None:
             self,
             *,
             request: Request,
-            conn: Connection,
+            idp: IdentityProvider,
             callback_url: str,
             flow_state: FlowState,
         ) -> RawIdentity:

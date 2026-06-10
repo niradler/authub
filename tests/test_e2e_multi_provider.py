@@ -8,10 +8,10 @@ import pytest
 from fastapi import Depends, FastAPI
 from pydantic import SecretStr
 
-from authub import Authub, Connection, Mapping, Principal, presets
+from authub import Authub, IdentityProvider, Mapping, Principal, presets
 from authub.idp import AuthubIdp, IdpClient, InMemoryIdpUserStore
 from authub.state import STATE_COOKIE
-from authub.stores.memory import InMemoryConnectionStore
+from authub.stores.memory import InMemoryIdentityProviderStore
 from authub.tokens.jwt import JwtTokenService
 
 ISSUER = "http://testserver/idp"
@@ -40,16 +40,16 @@ async def multi_client() -> AsyncIterator[tuple[httpx.AsyncClient, Authub]]:
         users=users,
     )
 
-    connections = InMemoryConnectionStore(
+    identity_providers = InMemoryIdentityProviderStore(
         [
-            Connection(
+            IdentityProvider(
                 id="acme-conn",
                 tenant_id="acme",
                 display_name="Acme IdP",
                 settings=presets.authub_idp(ISSUER, "acme-client", "acme-secret"),
                 mapping=Mapping(),
             ),
-            Connection(
+            IdentityProvider(
                 id="globex-conn",
                 tenant_id="globex",
                 display_name="Globex IdP",
@@ -60,7 +60,7 @@ async def multi_client() -> AsyncIterator[tuple[httpx.AsyncClient, Authub]]:
         domains={"acme.example": "acme", "globex.example": "globex"},
     )
     auth = Authub(
-        connections=connections,
+        identity_providers=identity_providers,
         tokens=JwtTokenService.ed25519(),
         state_secret="x" * 32,
     )
@@ -80,10 +80,10 @@ async def multi_client() -> AsyncIterator[tuple[httpx.AsyncClient, Authub]]:
 
 
 async def _run_login_flow(
-    client: httpx.AsyncClient, connection_id: str, username: str, password: str
+    client: httpx.AsyncClient, idp_id: str, username: str, password: str
 ) -> dict[str, object]:
-    """Drive a full credential login through the given connection and return the /me body."""
-    login = await client.get(f"/auth/{connection_id}/login", follow_redirects=False)
+    """Drive a full credential login through the given identity provider and return the /me body."""
+    login = await client.get(f"/auth/{idp_id}/login", follow_redirects=False)
     assert login.status_code == 302
     authorize_url = login.headers["location"]
 
@@ -110,7 +110,7 @@ async def _run_login_flow(
 async def test_two_tenants_complete_independently(
     multi_client: tuple[httpx.AsyncClient, Authub],
 ) -> None:
-    """Both connections complete full credential logins; tokens carry correct tenant and user."""
+    """Both identity providers complete full credential logins; tokens carry tenant and user."""
     client, _auth = multi_client
     acme_me = await _run_login_flow(client, "acme-conn", "alice", "pw")
     globex_me = await _run_login_flow(client, "globex-conn", "bob", "pw")
@@ -146,7 +146,7 @@ async def test_state_cookie_for_connection_a_rejected_at_connection_b_callback(
     state_cookie = client.cookies.get(STATE_COOKIE)
     assert state_cookie, "state cookie must be set after /login"
 
-    # Attempt to complete via globex-conn — must be rejected (connection mismatch)
+    # Attempt to complete via globex-conn — must be rejected (identity provider mismatch)
     response = await client.get("/auth/globex-conn/callback?code=fake&state=fake")
     assert response.status_code == 400
     assert response.json()["error"] == "invalid_state"

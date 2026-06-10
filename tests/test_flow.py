@@ -7,12 +7,12 @@ import pytest
 from pydantic import AnyHttpUrl, SecretStr, TypeAdapter
 from starlette.requests import Request
 
-from authub.errors import ConnectionNotFoundError, ForbiddenError
+from authub.errors import ForbiddenError, IdentityProviderNotFoundError
 from authub.flow import AuthFlow
 from authub.mapping import Mapper
 from authub.models import (
     CanonicalIdentity,
-    Connection,
+    IdentityProvider,
     Mapping,
     OidcSettings,
     Principal,
@@ -21,21 +21,21 @@ from authub.models import (
 from authub.plugins import Plugin, PluginChain
 from authub.protocols.base import AuthProtocol, ProtocolRegistry
 from authub.state import BeginResult, FlowState
-from authub.stores.memory import InMemoryConnectionStore, InMemoryUserStore
+from authub.stores.memory import InMemoryIdentityProviderStore, InMemoryUserStore
 from authub.tokens.jwt import JwtTokenService
 
 
 class FakeProtocol(AuthProtocol):
     kind = "oidc"
 
-    async def begin(self, *, conn: Any, callback_url: Any, return_to: Any) -> BeginResult:
+    async def begin(self, *, idp: Any, callback_url: Any, return_to: Any) -> BeginResult:
         return BeginResult(
             redirect_url="https://idp/auth",
-            flow_state=FlowState(connection_id=conn.id, return_to=return_to),
+            flow_state=FlowState(idp_id=idp.id, return_to=return_to),
         )
 
     async def complete(
-        self, *, request: Any, conn: Any, callback_url: Any, flow_state: Any
+        self, *, request: Any, idp: Any, callback_url: Any, flow_state: Any
     ) -> RawIdentity:
         return RawIdentity(claims={"sub": "ext-1", "email": "a@b.co", "name": "Ada"})
 
@@ -55,7 +55,7 @@ def dummy_request() -> Request:
 
 
 def make_flow(plugins: PluginChain | None = None) -> AuthFlow:
-    conn = Connection(
+    idp = IdentityProvider(
         id="c1",
         tenant_id="acme",
         display_name="C",
@@ -68,7 +68,7 @@ def make_flow(plugins: PluginChain | None = None) -> AuthFlow:
     registry = ProtocolRegistry()
     registry.register(FakeProtocol())
     return AuthFlow(
-        connections=InMemoryConnectionStore([conn]),
+        identity_providers=InMemoryIdentityProviderStore([idp]),
         users=InMemoryUserStore(),
         tokens=JwtTokenService.hs256("s" * 32),
         registry=registry,
@@ -80,16 +80,16 @@ def make_flow(plugins: PluginChain | None = None) -> AuthFlow:
 
 async def test_begin_unknown_connection() -> None:
     flow = make_flow()
-    with pytest.raises(ConnectionNotFoundError):
-        await flow.begin(connection_id="nope", callback_url="http://a/cb", return_to="/")
+    with pytest.raises(IdentityProviderNotFoundError):
+        await flow.begin(idp_id="nope", callback_url="http://a/cb", return_to="/")
 
 
 async def test_complete_provisions_and_issues_token() -> None:
     flow = make_flow()
-    begin = await flow.begin(connection_id="c1", callback_url="http://a/cb", return_to="/x")
+    begin = await flow.begin(idp_id="c1", callback_url="http://a/cb", return_to="/x")
     token, principal = await flow.complete(
         request=dummy_request(),
-        connection_id="c1",
+        idp_id="c1",
         callback_url="http://a/cb",
         flow_state=begin.flow_state,
     )
@@ -110,10 +110,10 @@ async def test_plugin_can_stamp_and_reject() -> None:
             return {**claims, "plan": "pro"}
 
     flow = make_flow(PluginChain([Stamp()]))
-    begin = await flow.begin(connection_id="c1", callback_url="http://a/cb", return_to="/")
+    begin = await flow.begin(idp_id="c1", callback_url="http://a/cb", return_to="/")
     token, _ = await flow.complete(
         request=dummy_request(),
-        connection_id="c1",
+        idp_id="c1",
         callback_url="http://a/cb",
         flow_state=begin.flow_state,
     )
@@ -127,11 +127,11 @@ async def test_plugin_can_stamp_and_reject() -> None:
             raise ForbiddenError("seats exceeded")
 
     flow = make_flow(PluginChain([Deny()]))
-    begin = await flow.begin(connection_id="c1", callback_url="http://a/cb", return_to="/")
+    begin = await flow.begin(idp_id="c1", callback_url="http://a/cb", return_to="/")
     with pytest.raises(ForbiddenError):
         await flow.complete(
             request=dummy_request(),
-            connection_id="c1",
+            idp_id="c1",
             callback_url="http://a/cb",
             flow_state=begin.flow_state,
         )
@@ -150,14 +150,14 @@ class FakeProtocolWithClaims(AuthProtocol):
     def __init__(self, claims: dict[str, Any]) -> None:
         self._claims = claims
 
-    async def begin(self, *, conn: Any, callback_url: Any, return_to: Any) -> BeginResult:
+    async def begin(self, *, idp: Any, callback_url: Any, return_to: Any) -> BeginResult:
         return BeginResult(
             redirect_url="https://idp/auth",
-            flow_state=FlowState(connection_id=conn.id, return_to=return_to),
+            flow_state=FlowState(idp_id=idp.id, return_to=return_to),
         )
 
     async def complete(
-        self, *, request: Any, conn: Any, callback_url: Any, flow_state: Any
+        self, *, request: Any, idp: Any, callback_url: Any, flow_state: Any
     ) -> RawIdentity:
         return RawIdentity(claims=self._claims)
 
@@ -167,7 +167,7 @@ def make_flow_with_mapping(
     mapping: Mapping,
     plugins: PluginChain | None = None,
 ) -> AuthFlow:
-    conn = Connection(
+    idp = IdentityProvider(
         id="c1",
         tenant_id="acme",
         display_name="C",
@@ -181,7 +181,7 @@ def make_flow_with_mapping(
     registry = ProtocolRegistry()
     registry.register(FakeProtocolWithClaims(raw_claims))
     return AuthFlow(
-        connections=InMemoryConnectionStore([conn]),
+        identity_providers=InMemoryIdentityProviderStore([idp]),
         users=InMemoryUserStore(),
         tokens=JwtTokenService.hs256("s" * 32),
         registry=registry,
@@ -201,10 +201,10 @@ async def test_claim_mapping_non_default_paths_and_lower_transform() -> None:
     )
     raw = {"sub": "u1", "mail": "Ada@TEST.COM", "groups": ["admin"]}
     flow = make_flow_with_mapping(raw, mapping)
-    begin = await flow.begin(connection_id="c1", callback_url="http://a/cb", return_to="/")
+    begin = await flow.begin(idp_id="c1", callback_url="http://a/cb", return_to="/")
     token, principal = await flow.complete(
         request=dummy_request(),
-        connection_id="c1",
+        idp_id="c1",
         callback_url="http://a/cb",
         flow_state=begin.flow_state,
     )
@@ -228,7 +228,7 @@ async def test_on_identity_can_mutate_raw_claims() -> None:
     """on_identity hook can enrich RawIdentity claims before mapping."""
 
     class EnrichPlugin(Plugin):
-        async def on_identity(self, raw: RawIdentity, conn: Connection) -> None:
+        async def on_identity(self, raw: RawIdentity, idp: IdentityProvider) -> None:
             raw.claims["email"] = "enriched@example.com"
 
     raw = {"sub": "u1", "email": "original@example.com", "name": "Ada"}
@@ -237,10 +237,10 @@ async def test_on_identity_can_mutate_raw_claims() -> None:
         Mapping(),
         plugins=PluginChain([EnrichPlugin()]),
     )
-    begin = await flow.begin(connection_id="c1", callback_url="http://a/cb", return_to="/")
+    begin = await flow.begin(idp_id="c1", callback_url="http://a/cb", return_to="/")
     _token, principal = await flow.complete(
         request=dummy_request(),
-        connection_id="c1",
+        idp_id="c1",
         callback_url="http://a/cb",
         flow_state=begin.flow_state,
     )
@@ -263,10 +263,10 @@ async def test_on_user_provisioned_is_called_with_principal() -> None:
         Mapping(),
         plugins=PluginChain([RecordPlugin()]),
     )
-    begin = await flow.begin(connection_id="c1", callback_url="http://a/cb", return_to="/")
+    begin = await flow.begin(idp_id="c1", callback_url="http://a/cb", return_to="/")
     _token, principal = await flow.complete(
         request=dummy_request(),
-        connection_id="c1",
+        idp_id="c1",
         callback_url="http://a/cb",
         flow_state=begin.flow_state,
     )

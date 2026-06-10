@@ -24,12 +24,12 @@ if _XMLSEC is not None:
     from saml2.saml import NAMEID_FORMAT_PERSISTENT, NameID
     from saml2.server import Server
 
-    from authub import Authub, Connection, Mapping
+    from authub import Authub, IdentityProvider, Mapping
     from authub.errors import ProtocolError
     from authub.models import SamlSettings
     from authub.protocols.saml import SamlProtocol
     from authub.state import STATE_COOKIE
-    from authub.stores.memory import InMemoryConnectionStore
+    from authub.stores.memory import InMemoryIdentityProviderStore
     from authub.tokens.jwt import JwtTokenService
 
 SP_ENTITY = "https://app.test/saml/metadata"
@@ -125,8 +125,10 @@ def settings(idp: Server) -> SamlSettings:
     )
 
 
-def make_conn(settings: SamlSettings) -> Connection:
-    return Connection(id="acme-saml", tenant_id="acme", display_name="Acme SAML", settings=settings)
+def make_conn(settings: SamlSettings) -> IdentityProvider:
+    return IdentityProvider(
+        id="acme-saml", tenant_id="acme", display_name="Acme SAML", settings=settings
+    )
 
 
 def post_request(path: str, data: dict[str, str]) -> Request:
@@ -172,14 +174,14 @@ def idp_handle_request(idp: Server, redirect_url: str, *, sign: bool = True) -> 
 async def test_full_saml_round_trip(idp: Server, settings: SamlSettings) -> None:
     protocol = SamlProtocol()
     conn = make_conn(settings)
-    begin = await protocol.begin(conn=conn, callback_url=ACS_URL, return_to="/")
+    begin = await protocol.begin(idp=conn, callback_url=ACS_URL, return_to="/")
     assert "SAMLRequest=" in begin.redirect_url
     assert begin.flow_state.request_id
 
     saml_response = idp_handle_request(idp, begin.redirect_url)
     raw = await protocol.complete(
         request=post_request("/cb", {"SAMLResponse": saml_response, "RelayState": "/"}),
-        conn=conn,
+        idp=conn,
         callback_url=ACS_URL,
         flow_state=begin.flow_state,
     )
@@ -191,12 +193,12 @@ async def test_full_saml_round_trip(idp: Server, settings: SamlSettings) -> None
 async def test_unsigned_response_rejected(idp: Server, settings: SamlSettings) -> None:
     protocol = SamlProtocol()
     conn = make_conn(settings)
-    begin = await protocol.begin(conn=conn, callback_url=ACS_URL, return_to="/")
+    begin = await protocol.begin(idp=conn, callback_url=ACS_URL, return_to="/")
     saml_response = idp_handle_request(idp, begin.redirect_url, sign=False)
     with pytest.raises(ProtocolError):
         await protocol.complete(
             request=post_request("/cb", {"SAMLResponse": saml_response}),
-            conn=conn,
+            idp=conn,
             callback_url=ACS_URL,
             flow_state=begin.flow_state,
         )
@@ -205,13 +207,13 @@ async def test_unsigned_response_rejected(idp: Server, settings: SamlSettings) -
 async def test_unknown_in_response_to_rejected(idp: Server, settings: SamlSettings) -> None:
     protocol = SamlProtocol()
     conn = make_conn(settings)
-    begin = await protocol.begin(conn=conn, callback_url=ACS_URL, return_to="/")
+    begin = await protocol.begin(idp=conn, callback_url=ACS_URL, return_to="/")
     saml_response = idp_handle_request(idp, begin.redirect_url)
     forged_state = begin.flow_state.model_copy(update={"request_id": "id-forged"})
     with pytest.raises(ProtocolError):
         await protocol.complete(
             request=post_request("/cb", {"SAMLResponse": saml_response}),
-            conn=conn,
+            idp=conn,
             callback_url=ACS_URL,
             flow_state=forged_state,
         )
@@ -220,7 +222,7 @@ async def test_unknown_in_response_to_rejected(idp: Server, settings: SamlSettin
 async def test_saml_login_through_http_router(idp: Server, settings: SamlSettings) -> None:
     """Full SAML SP flow through the Authub HTTP router: login → IdP → callback → token."""
     saml_mapping = Mapping(external_id="name_id", email="mail", name="cn")
-    connection = Connection(
+    connection = IdentityProvider(
         id="acme-saml",
         tenant_id="acme",
         display_name="Acme SAML",
@@ -228,7 +230,7 @@ async def test_saml_login_through_http_router(idp: Server, settings: SamlSetting
         mapping=saml_mapping,
     )
     hub = Authub(
-        connections=InMemoryConnectionStore([connection]),
+        identity_providers=InMemoryIdentityProviderStore([connection]),
         tokens=JwtTokenService.hs256("s" * 32),
         state_secret="x" * 32,
     )

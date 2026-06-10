@@ -14,7 +14,7 @@ from pydantic import AnyHttpUrl, SecretStr
 from starlette.requests import Request
 
 from authub.errors import InvalidStateError, ProtocolError
-from authub.models import Connection, OidcSettings
+from authub.models import IdentityProvider, OidcSettings
 from authub.protocols.base import HttpOptions
 from authub.protocols.oidc import OidcProtocol
 
@@ -22,8 +22,8 @@ ISSUER = "https://idp.test"
 IDP_KEY = RSAKey.generate_key(2048, auto_kid=True)
 
 
-def make_conn(**settings_overrides: Any) -> Connection:
-    return Connection(
+def make_conn(**settings_overrides: Any) -> IdentityProvider:
+    return IdentityProvider(
         id="acme-oidc",
         tenant_id="acme",
         display_name="Test IdP",
@@ -84,7 +84,7 @@ async def test_begin_builds_authorize_url_and_state() -> None:
     mock_discovery(respx.mock)
     protocol = OidcProtocol()
     result = await protocol.begin(
-        conn=make_conn(), callback_url="http://app/auth/acme-oidc/callback", return_to="/x"
+        idp=make_conn(), callback_url="http://app/auth/acme-oidc/callback", return_to="/x"
     )
     parts = urlsplit(result.redirect_url)
     query = parse_qs(parts.query)
@@ -101,7 +101,7 @@ async def test_begin_builds_authorize_url_and_state() -> None:
 async def test_complete_happy_path() -> None:
     mock_discovery(respx.mock)
     protocol = OidcProtocol()
-    begin = await protocol.begin(conn=make_conn(), callback_url="http://app/cb", return_to="/")
+    begin = await protocol.begin(idp=make_conn(), callback_url="http://app/cb", return_to="/")
     state = begin.flow_state
     assert state.nonce
     respx.mock.post(f"{ISSUER}/token").respond(
@@ -113,7 +113,7 @@ async def test_complete_happy_path() -> None:
     )
     request = get_request(f"http://app/cb?code=c1&state={state.state}")
     raw = await protocol.complete(
-        request=request, conn=make_conn(), callback_url="http://app/cb", flow_state=state
+        request=request, idp=make_conn(), callback_url="http://app/cb", flow_state=state
     )
     assert raw.claims["sub"] == "user-1"
     assert raw.claims["email"] == "a@b.co"
@@ -123,12 +123,12 @@ async def test_complete_happy_path() -> None:
 async def test_complete_rejects_state_mismatch() -> None:
     mock_discovery(respx.mock)
     protocol = OidcProtocol()
-    begin = await protocol.begin(conn=make_conn(), callback_url="http://app/cb", return_to="/")
+    begin = await protocol.begin(idp=make_conn(), callback_url="http://app/cb", return_to="/")
     request = get_request("http://app/cb?code=c1&state=WRONG")
     with pytest.raises(InvalidStateError):
         await protocol.complete(
             request=request,
-            conn=make_conn(),
+            idp=make_conn(),
             callback_url="http://app/cb",
             flow_state=begin.flow_state,
         )
@@ -138,7 +138,7 @@ async def test_complete_rejects_state_mismatch() -> None:
 async def test_complete_rejects_nonce_mismatch() -> None:
     mock_discovery(respx.mock)
     protocol = OidcProtocol()
-    begin = await protocol.begin(conn=make_conn(), callback_url="http://app/cb", return_to="/")
+    begin = await protocol.begin(idp=make_conn(), callback_url="http://app/cb", return_to="/")
     state = begin.flow_state
     respx.mock.post(f"{ISSUER}/token").respond(
         json={"access_token": "at", "id_token": make_id_token(nonce="EVIL")}
@@ -146,7 +146,7 @@ async def test_complete_rejects_nonce_mismatch() -> None:
     request = get_request(f"http://app/cb?code=c1&state={state.state}")
     with pytest.raises(ProtocolError):
         await protocol.complete(
-            request=request, conn=make_conn(), callback_url="http://app/cb", flow_state=state
+            request=request, idp=make_conn(), callback_url="http://app/cb", flow_state=state
         )
 
 
@@ -154,7 +154,7 @@ async def test_complete_rejects_nonce_mismatch() -> None:
 async def test_complete_rejects_expired_id_token() -> None:
     mock_discovery(respx.mock)
     protocol = OidcProtocol()
-    begin = await protocol.begin(conn=make_conn(), callback_url="http://app/cb", return_to="/")
+    begin = await protocol.begin(idp=make_conn(), callback_url="http://app/cb", return_to="/")
     state = begin.flow_state
     assert state.nonce
     expired = make_id_token(nonce=state.nonce, exp=int(time.time()) - 1000)
@@ -162,7 +162,7 @@ async def test_complete_rejects_expired_id_token() -> None:
     request = get_request(f"http://app/cb?code=c1&state={state.state}")
     with pytest.raises(ProtocolError):
         await protocol.complete(
-            request=request, conn=make_conn(), callback_url="http://app/cb", flow_state=state
+            request=request, idp=make_conn(), callback_url="http://app/cb", flow_state=state
         )
 
 
@@ -170,7 +170,7 @@ async def test_complete_rejects_expired_id_token() -> None:
 async def test_complete_rejects_wrong_audience() -> None:
     mock_discovery(respx.mock)
     protocol = OidcProtocol()
-    begin = await protocol.begin(conn=make_conn(), callback_url="http://app/cb", return_to="/")
+    begin = await protocol.begin(idp=make_conn(), callback_url="http://app/cb", return_to="/")
     state = begin.flow_state
     assert state.nonce
     respx.mock.post(f"{ISSUER}/token").respond(
@@ -179,7 +179,7 @@ async def test_complete_rejects_wrong_audience() -> None:
     request = get_request(f"http://app/cb?code=c1&state={state.state}")
     with pytest.raises(ProtocolError):
         await protocol.complete(
-            request=request, conn=make_conn(), callback_url="http://app/cb", flow_state=state
+            request=request, idp=make_conn(), callback_url="http://app/cb", flow_state=state
         )
 
 
@@ -187,12 +187,12 @@ async def test_complete_rejects_wrong_audience() -> None:
 async def test_complete_surfaces_idp_error_param() -> None:
     mock_discovery(respx.mock)
     protocol = OidcProtocol()
-    begin = await protocol.begin(conn=make_conn(), callback_url="http://app/cb", return_to="/")
+    begin = await protocol.begin(idp=make_conn(), callback_url="http://app/cb", return_to="/")
     request = get_request("http://app/cb?error=access_denied")
     with pytest.raises(ProtocolError, match="access_denied"):
         await protocol.complete(
             request=request,
-            conn=make_conn(),
+            idp=make_conn(),
             callback_url="http://app/cb",
             flow_state=begin.flow_state,
         )
@@ -203,7 +203,7 @@ async def test_userinfo_cannot_override_id_token_claims() -> None:
     mock_discovery(respx.mock)
     protocol = OidcProtocol()
     begin = await protocol.begin(
-        conn=make_conn(fetch_userinfo=True), callback_url="http://app/cb", return_to="/"
+        idp=make_conn(fetch_userinfo=True), callback_url="http://app/cb", return_to="/"
     )
     state = begin.flow_state
     assert state.nonce
@@ -220,7 +220,7 @@ async def test_userinfo_cannot_override_id_token_claims() -> None:
     request = get_request(f"http://app/cb?code=c1&state={state.state}")
     raw = await protocol.complete(
         request=request,
-        conn=make_conn(fetch_userinfo=True),
+        idp=make_conn(fetch_userinfo=True),
         callback_url="http://app/cb",
         flow_state=state,
     )
@@ -235,7 +235,7 @@ async def test_discovery_issuer_mismatch_rejected() -> None:
     )
     protocol = OidcProtocol()
     with pytest.raises(ProtocolError, match="issuer"):
-        await protocol.begin(conn=make_conn(), callback_url="http://app/cb", return_to="/")
+        await protocol.begin(idp=make_conn(), callback_url="http://app/cb", return_to="/")
 
 
 async def test_per_key_locks_allow_concurrent_discovery_of_different_issuers() -> None:
@@ -272,7 +272,7 @@ async def test_per_key_locks_allow_concurrent_discovery_of_different_issuers() -
     http.timeout = 5.0
     protocol = OidcProtocol(http=http)
 
-    conn_a = Connection(
+    idp_a = IdentityProvider(
         id="a",
         tenant_id="ta",
         display_name="A",
@@ -282,7 +282,7 @@ async def test_per_key_locks_allow_concurrent_discovery_of_different_issuers() -
             client_secret=SecretStr("s"),
         ),
     )
-    conn_b = Connection(
+    idp_b = IdentityProvider(
         id="b",
         tenant_id="tb",
         display_name="B",
@@ -294,13 +294,13 @@ async def test_per_key_locks_allow_concurrent_discovery_of_different_issuers() -
     )
 
     task_a = asyncio.create_task(
-        protocol.begin(conn=conn_a, callback_url="http://app/cb", return_to="/")
+        protocol.begin(idp=idp_a, callback_url="http://app/cb", return_to="/")
     )
 
     await asyncio.sleep(0)
 
     result_b = await asyncio.wait_for(
-        protocol.begin(conn=conn_b, callback_url="http://app/cb", return_to="/"),
+        protocol.begin(idp=idp_b, callback_url="http://app/cb", return_to="/"),
         timeout=2.0,
     )
     assert result_b.redirect_url.startswith(f"{issuer_b}/authorize")

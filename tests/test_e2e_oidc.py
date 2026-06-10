@@ -7,9 +7,9 @@ import pytest
 from fastapi import Depends, FastAPI
 from pydantic import SecretStr
 
-from authub import Authub, Connection, Mapping, Principal, presets
+from authub import Authub, IdentityProvider, Mapping, Principal, presets
 from authub.idp import AuthubIdp, IdpClient, InMemoryIdpUserStore
-from authub.stores.memory import InMemoryConnectionStore
+from authub.stores.memory import InMemoryIdentityProviderStore
 from authub.tokens.jwt import JwtTokenService
 
 ISSUER = "http://testserver/idp"
@@ -32,9 +32,9 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
         auto_login="alice",
     )
 
-    connections = InMemoryConnectionStore(
+    identity_providers = InMemoryIdentityProviderStore(
         [
-            Connection(
+            IdentityProvider(
                 id="authub-idp",
                 tenant_id="acme",
                 display_name="Dev IdP",
@@ -45,7 +45,7 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
         domains={"acme.example": "acme"},
     )
     auth = Authub(
-        connections=connections,
+        identity_providers=identity_providers,
         tokens=JwtTokenService.ed25519(),
         state_secret="x" * 32,
     )
@@ -66,7 +66,7 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
 
 async def test_full_login_journey(client: httpx.AsyncClient) -> None:
     discover = await client.get("/auth/discover", params={"email": "alice@acme.example"})
-    assert discover.json()["connections"][0]["connection_id"] == "authub-idp"
+    assert discover.json()["identity_providers"][0]["idp_id"] == "authub-idp"
 
     login = await client.get("/auth/authub-idp/login?return_to=/dash", follow_redirects=False)
     assert login.status_code == 302

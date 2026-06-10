@@ -10,7 +10,7 @@ SECRET = "x" * 32
 
 def make_state() -> FlowState:
     return FlowState(
-        connection_id="acme-okta",
+        idp_id="acme-okta",
         return_to="/app",
         state="st",
         nonce="n",

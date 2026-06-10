@@ -7,14 +7,14 @@ from pydantic import SecretStr
 
 from authub.hub import Authub
 from authub.models import (
-    Connection,
+    IdentityProvider,
     OidcSettings,
     RawIdentity,
     SessionCookieConfig,
 )
 from authub.protocols.base import AuthProtocol
 from authub.state import STATE_COOKIE, BeginResult, FlowState
-from authub.stores.memory import InMemoryConnectionStore
+from authub.stores.memory import InMemoryIdentityProviderStore
 from authub.tokens.base import InMemoryRevocationStore
 from authub.tokens.jwt import JwtTokenService
 from authub.web.router import sanitize_return_to
@@ -23,20 +23,20 @@ from authub.web.router import sanitize_return_to
 class FakeProtocol(AuthProtocol):
     kind = "oidc"
 
-    async def begin(self, *, conn: object, callback_url: object, return_to: object) -> BeginResult:
+    async def begin(self, *, idp: object, callback_url: object, return_to: object) -> BeginResult:
         return BeginResult(
             redirect_url=f"https://idp.test/authorize?cb={callback_url}",
-            flow_state=FlowState(connection_id=conn.id, return_to=return_to),  # type: ignore[attr-defined, arg-type]
+            flow_state=FlowState(idp_id=idp.id, return_to=return_to),  # type: ignore[attr-defined, arg-type]
         )
 
     async def complete(
-        self, *, request: object, conn: object, callback_url: object, flow_state: object
+        self, *, request: object, idp: object, callback_url: object, flow_state: object
     ) -> RawIdentity:
         return RawIdentity(claims={"sub": "ext-1", "email": "a@b.co", "name": "Ada"})
 
 
 def make_app(**hub_kwargs: object) -> tuple[FastAPI, Authub]:
-    conn = Connection(
+    idp = IdentityProvider(
         id="acme-idp",
         tenant_id="acme",
         display_name="Acme IdP",
@@ -47,7 +47,7 @@ def make_app(**hub_kwargs: object) -> tuple[FastAPI, Authub]:
         ),
     )
     hub = Authub(
-        connections=InMemoryConnectionStore([conn], domains={"acme.com": "acme"}),
+        identity_providers=InMemoryIdentityProviderStore([idp], domains={"acme.com": "acme"}),
         tokens=JwtTokenService.hs256("s" * 32),
         state_secret="x" * 32,
         **hub_kwargs,  # type: ignore[arg-type]
@@ -79,7 +79,7 @@ async def test_login_redirects_and_sets_state_cookie() -> None:
     cookie = response.cookies.get(STATE_COOKIE)
     assert cookie
     state = hub.state_codec.decode(cookie)
-    assert state.connection_id == "acme-idp" and state.return_to == "/dash"
+    assert state.idp_id == "acme-idp" and state.return_to == "/dash"
 
 
 async def test_login_unknown_connection_is_clean_404() -> None:
@@ -88,8 +88,8 @@ async def test_login_unknown_connection_is_clean_404() -> None:
         response = await client.get("/auth/nope/login", follow_redirects=False)
     assert response.status_code == 404
     assert response.json() == {
-        "error": "connection_not_found",
-        "error_description": "Unknown connection",
+        "error": "identity_provider_not_found",
+        "error_description": "Unknown identity provider",
     }
 
 
@@ -120,7 +120,7 @@ async def test_callback_without_state_cookie_is_400() -> None:
 
 async def test_callback_connection_mismatch_rejected() -> None:
     app, hub = make_app()
-    other_state = hub.state_codec.encode(FlowState(connection_id="other"))
+    other_state = hub.state_codec.encode(FlowState(idp_id="other"))
     async with client_for(app) as client:
         client.cookies.set(STATE_COOKIE, other_state)
         response = await client.get("/auth/acme-idp/callback?code=c")
@@ -147,9 +147,9 @@ async def test_discover_uniform_shape() -> None:
         known = await client.get("/auth/discover", params={"email": "a@acme.com"})
         unknown = await client.get("/auth/discover", params={"email": "a@nope.io"})
     assert known.status_code == 200
-    assert known.json()["connections"][0]["connection_id"] == "acme-idp"
+    assert known.json()["identity_providers"][0]["idp_id"] == "acme-idp"
     assert unknown.status_code == 200
-    assert unknown.json() == {"connections": []}
+    assert unknown.json() == {"identity_providers": []}
 
 
 async def test_discover_malformed_email_returns_200_empty() -> None:
@@ -160,7 +160,7 @@ async def test_discover_malformed_email_returns_200_empty() -> None:
         no_domain = await client.get("/auth/discover", params={"email": "user@"})
     for response in (no_at, no_local, no_domain):
         assert response.status_code == 200
-        assert response.json() == {"connections": []}
+        assert response.json() == {"identity_providers": []}
 
 
 async def test_logout_revokes_bearer_token() -> None:
@@ -227,7 +227,7 @@ async def test_idp_error_param_returns_400_protocol_error() -> None:
 
     class ErrorProtocol(FakeProtocol):
         async def complete(
-            self, *, request: object, conn: object, callback_url: object, flow_state: object
+            self, *, request: object, idp: object, callback_url: object, flow_state: object
         ) -> RawIdentity:
             if isinstance(request, StarletteRequest) and "error" in request.query_params:
                 raise ProtocolError(

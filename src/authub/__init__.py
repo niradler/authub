@@ -7,8 +7,8 @@ from authub.hub import Authub
 from authub.mapping import Mapper, register_transform
 from authub.models import (
     CanonicalIdentity,
-    Connection,
-    ConnectionInfo,
+    IdentityProvider,
+    IdentityProviderInfo,
     Mapping,
     OAuth2Settings,
     OidcSettings,
@@ -39,8 +39,8 @@ __all__ = [
     "Authub",
     "AuthubError",
     "CanonicalIdentity",
-    "Connection",
-    "ConnectionInfo",
+    "IdentityProvider",
+    "IdentityProviderInfo",
     "InMemoryScimGroupStore",
     "InMemoryScimUserStore",
     "Mapper",
