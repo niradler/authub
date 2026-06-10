@@ -186,6 +186,7 @@ class AuthubIdp:
             "sub": sub,
             "purpose": "consent",
             "params": params,
+            "jti": secrets.token_urlsafe(16),
             "iat": now,
             "exp": now + 300,
         }
@@ -193,11 +194,11 @@ class AuthubIdp:
             {"alg": "RS256", "kid": self._key.kid}, payload, self._key, algorithms=["RS256"]
         )
 
-    def _verify_consent_ticket(self, ticket: str) -> tuple[str, dict[str, str]] | None:
+    def _verify_consent_ticket(self, ticket: str) -> tuple[str, dict[str, str], str, int] | None:
         """Decode and verify a consent ticket.
 
-        Returns (sub, params) on success, None on any failure (bad signature,
-        wrong purpose, expired, or malformed).
+        Returns (sub, params, jti, exp) on success, None on any failure (bad
+        signature, wrong purpose, expired, or malformed).
         """
         try:
             token = jwt.decode(ticket, self._key, algorithms=["RS256"])
@@ -208,10 +209,14 @@ class AuthubIdp:
             return None
         raw_params = token.claims.get("params")
         sub = token.claims.get("sub")
+        jti = token.claims.get("jti")
+        exp = token.claims.get("exp")
         if not isinstance(sub, str) or not isinstance(raw_params, dict):
             return None
+        if not isinstance(jti, str) or not isinstance(exp, int):
+            return None
         params: dict[str, str] = {str(k): str(v) for k, v in raw_params.items()}
-        return sub, params
+        return sub, params, jti, exp
 
     def jwks(self) -> KeySetSerialization:
         """Return the public JWKS for this IdP."""
@@ -432,7 +437,16 @@ class AuthubIdp:
                     },
                     status_code=400,
                 )
-            sub, params = result
+            sub, params, jti, exp = result
+            fresh = await self._grants.consume_consent_ticket(jti, exp)
+            if not fresh:
+                return JSONResponse(
+                    {
+                        "error": "invalid_request",
+                        "error_description": "consent ticket already used",
+                    },
+                    status_code=400,
+                )
             if form.get("decision") != "approve":
                 query: dict[str, str] = {"error": "access_denied"}
                 if params.get("state"):

@@ -57,6 +57,8 @@ class IdpGrantStore(ABC):
     All retrieval methods must return None for expired entries.
     rotate_refresh_token must be atomic: ACTIVE marks the token consumed in
     the same operation that returns it; REUSE immediately revokes the family.
+    consume_consent_ticket must be atomic: each consent ticket jti is
+    accepted at most once regardless of the decision made.
     """
 
     @abstractmethod
@@ -102,6 +104,15 @@ class IdpGrantStore(ABC):
         """Revoke all refresh tokens belonging to a family."""
         ...
 
+    @abstractmethod
+    async def consume_consent_ticket(self, jti: str, expires_at: int) -> bool:
+        """Atomically record a consent ticket's jti as used.
+
+        Returns True if this jti was not seen before (first use), False if it
+        was already consumed. expires_at lets the store evict stale entries.
+        """
+        ...
+
 
 class InMemoryIdpGrantStore(IdpGrantStore):
     """In-process grant store. Not suitable for multi-instance deployments."""
@@ -112,6 +123,7 @@ class InMemoryIdpGrantStore(IdpGrantStore):
         self._refresh_tokens: dict[str, RefreshToken] = {}
         self._consumed_tokens: dict[str, RefreshToken] = {}
         self._revoked_families: set[str] = set()
+        self._consumed_consent_tickets: dict[str, int] = {}
 
     async def save_code(self, code: AuthCode) -> None:
         self._evict_expired_codes()
@@ -162,6 +174,13 @@ class InMemoryIdpGrantStore(IdpGrantStore):
         for t in dead:
             self._consumed_tokens[t] = self._refresh_tokens.pop(t)
 
+    async def consume_consent_ticket(self, jti: str, expires_at: int) -> bool:
+        self._evict_consumed_consent_tickets()
+        if jti in self._consumed_consent_tickets:
+            return False
+        self._consumed_consent_tickets[jti] = expires_at
+        return True
+
     def _evict_expired_codes(self) -> None:
         now = int(time.time())
         expired = [k for k, v in self._codes.items() if v.expires_at <= now]
@@ -182,6 +201,12 @@ class InMemoryIdpGrantStore(IdpGrantStore):
         expired_active = [t for t, rt in self._refresh_tokens.items() if rt.expires_at <= now]
         for t in expired_active:
             del self._refresh_tokens[t]
+
+    def _evict_consumed_consent_tickets(self) -> None:
+        now = int(time.time())
+        expired = [jti for jti, exp in self._consumed_consent_tickets.items() if exp <= now]
+        for jti in expired:
+            del self._consumed_consent_tickets[jti]
 
 
 class IdpUserStore(ABC):

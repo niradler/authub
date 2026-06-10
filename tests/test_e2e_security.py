@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 
 from joserfc import jwt
@@ -271,3 +272,73 @@ async def test_no_access_token_header_at_userinfo_returns_401() -> None:
         resp = await client.get("/idp/userinfo")
     assert resp.status_code == 401
     assert resp.json()["error"] == "invalid_token"
+
+
+_AUTHORIZE_PARAMS_CONSENT = {
+    "response_type": "code",
+    "client_id": "app",
+    "redirect_uri": REDIRECT,
+    "scope": "openid",
+    "state": "st1",
+    "nonce": "n1",
+    "code_challenge": s256("v" * 43),
+    "code_challenge_method": "S256",
+}
+
+
+async def _get_consent_ticket(client: object) -> str:
+    import httpx
+
+    assert isinstance(client, httpx.AsyncClient)
+    login = await client.post(
+        "/idp/login",
+        data={**_AUTHORIZE_PARAMS_CONSENT, "username": "alice", "password": "wonderland"},
+    )
+    assert login.status_code == 200, login.text
+    m = re.search(r'name="ticket" value="([^"]+)"', login.text)
+    assert m is not None, "consent form has no ticket field"
+    return m.group(1)
+
+
+async def test_consent_ticket_single_use_replay_rejected() -> None:
+    """A consent ticket used once (approve) cannot be replayed for a second code."""
+    idp, _ = make_bare_idp(require_consent=True)
+    async with make_bare_client(idp) as client:
+        ticket = await _get_consent_ticket(client)
+
+        first = await client.post(
+            "/idp/consent",
+            data={"ticket": ticket, "decision": "approve"},
+        )
+        assert first.status_code == 302
+        assert "code=" in first.headers["location"]
+
+        second = await client.post(
+            "/idp/consent",
+            data={"ticket": ticket, "decision": "approve"},
+        )
+    assert second.status_code == 400
+    assert second.json()["error"] == "invalid_request"
+    assert "code=" not in second.headers.get("location", "")
+
+
+async def test_consent_ticket_consumed_even_on_deny() -> None:
+    """A consent ticket used for deny cannot be replayed for approve."""
+    idp, _ = make_bare_idp(require_consent=True)
+    async with make_bare_client(idp) as client:
+        ticket = await _get_consent_ticket(client)
+
+        deny = await client.post(
+            "/idp/consent",
+            data={"ticket": ticket, "decision": "deny"},
+        )
+        assert deny.status_code == 302
+        assert "error=access_denied" in deny.headers["location"]
+
+        replay = await client.post(
+            "/idp/consent",
+            data={"ticket": ticket, "decision": "approve"},
+        )
+    assert replay.status_code == 400
+    assert replay.json()["error"] == "invalid_request"
+    assert "code=" not in replay.headers.get("location", "")
