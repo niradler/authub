@@ -15,6 +15,8 @@ from authub.tokens.claims import build_user_claims
 
 
 class AuthFlow:
+    """Orchestrates the two-step login flow across protocol, store, mapping, and plugin layers."""
+
     def __init__(
         self,
         *,
@@ -35,6 +37,7 @@ class AuthFlow:
         self.user_token_ttl = user_token_ttl
 
     async def begin(self, *, connection_id: str, callback_url: str, return_to: str) -> BeginResult:
+        """Start a login for the given connection. Return the IdP redirect URL and flow state."""
         conn = await self.connections.get(connection_id)
         protocol = self.registry.get(conn.settings.kind)
         return await protocol.begin(conn=conn, callback_url=callback_url, return_to=return_to)
@@ -47,6 +50,10 @@ class AuthFlow:
         callback_url: str,
         flow_state: FlowState,
     ) -> tuple[str, Principal]:
+        """Finish a login: validate the callback, map claims, upsert the user, issue a JWT.
+
+        Returns a ``(token, principal)`` tuple. Plugins run at each stage and may raise to abort.
+        """
         conn = await self.connections.get(connection_id)
         protocol = self.registry.get(conn.settings.kind)
         raw = await protocol.complete(

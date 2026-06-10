@@ -1,7 +1,7 @@
 # authub — project instructions
 
 authub is an open-source (MIT) typed, composable authentication hub for FastAPI: OAuth2/OIDC/SAML SP,
-user+service JWTs, pluggable stores/email/plugins, and an embedded dev OIDC IdP (`authub.idp.DevIdp`).
+user+service JWTs, pluggable stores/email/plugins, and an embedded OIDC IdP (`authub.idp.AuthubIdp`).
 
 ## The plan is the source of truth
 

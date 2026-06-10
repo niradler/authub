@@ -16,6 +16,11 @@ from authub.state import BeginResult, FlowState
 
 
 class SamlProtocol(AuthProtocol):
+    """SAML 2.0 SP protocol backed by pysaml2 with bounded parallelism via asyncio.Semaphore.
+
+    Requires the ``xmlsec1`` binary on PATH (or passed via ``xmlsec_binary``).
+    """
+
     kind = "saml"
 
     def __init__(self, max_parallel: int = 4, xmlsec_binary: str | None = None) -> None:

@@ -10,6 +10,7 @@ from authub.models import CanonicalIdentity, Mapping, RawIdentity
 
 
 def extract(claims: dict[str, Any], path: str) -> Any:
+    """Walk a dotted key path into a nested dict, returning ``None`` at any missing segment."""
     value: Any = claims
     for part in path.split("."):
         if not isinstance(value, dict):
@@ -27,6 +28,7 @@ def _scalar(value: Any) -> Any:
 
 
 def as_list(value: Any) -> list[str]:
+    """Coerce a scalar or list value to ``list[str]``, returning ``[]`` for ``None``."""
     if value is None:
         return []
     if isinstance(value, list):
@@ -42,11 +44,22 @@ _TRANSFORMS: dict[str, Callable[[str], str]] = {
 
 
 def register_transform(name: str, fn: Callable[[str], str]) -> None:
+    """Register a named string transform for use in ``Mapping.transforms``.
+
+    Built-in names are ``"lower"``, ``"upper"``, and ``"strip"``.
+    """
     _TRANSFORMS[name] = fn
 
 
 class Mapper:
+    """Converts ``RawIdentity`` claims into ``CanonicalIdentity`` according to a ``Mapping``."""
+
     def normalize(self, raw: RawIdentity, mapping: Mapping) -> CanonicalIdentity:
+        """Apply ``mapping`` to ``raw`` claims and return a validated ``CanonicalIdentity``.
+
+        Raises ``MappingError`` when the required ``external_id`` claim is absent, a named
+        transform is unknown, a transform raises, or the resulting identity fails validation.
+        """
         external_id = _scalar(extract(raw.claims, mapping.external_id))
         if external_id is None or str(external_id) == "":
             raise MappingError(f"required claim {mapping.external_id!r} is missing or empty")

@@ -35,6 +35,24 @@ logger = logging.getLogger(__name__)
 
 
 class Authub:
+    """Central configuration object for authub.
+
+    Wire it once, then call ``attach`` or use the ``router`` property.
+
+    Args:
+        connections: Store of ``Connection`` records (required).
+        tokens: JWT signing/verification service (required).
+        state_secret: Symmetric secret for login-flow state cookies; at least 32 characters.
+        users: User store; defaults to ``InMemoryUserStore`` when omitted.
+        email: Email sender; defaults to ``ConsoleEmailSender`` when omitted.
+        revocation: Optional revocation store; revocation is skipped when ``None``.
+        plugins: Ordered plugin hooks applied to every login and token operation.
+        mapper: Custom claim mapper; defaults to ``Mapper()`` when omitted.
+        user_token_ttl: Lifetime for user JWTs (default 8 hours).
+        session_cookie: Enable browser-session cookies and CSRF protection when provided.
+        public_base_url: Override the base URL used to build callback URLs (useful behind a proxy).
+    """
+
     def __init__(
         self,
         *,
@@ -86,6 +104,10 @@ class Authub:
         self.registry.register(SamlProtocol())
 
     async def verify_token(self, token: str) -> TokenClaims:
+        """Verify a JWT and run plugin hooks.
+
+        Raise ``InvalidTokenError`` or ``TokenRevokedError`` on failure.
+        """
         claims = await self.tokens.verify(token)
         if self.revocation is not None and await self.revocation.is_revoked(claims.jti):
             raise TokenRevokedError()
@@ -95,6 +117,10 @@ class Authub:
     async def issue_service_token(
         self, principal: Principal, *, ttl: timedelta | None = None
     ) -> str:
+        """Sign a service JWT for a ``SERVICE`` principal.
+
+        Raise ``ForbiddenError`` for user principals. Pass ``ttl=None`` for a non-expiring token.
+        """
         if principal.type is not PrincipalType.SERVICE:
             raise ForbiddenError("issue_service_token requires a service principal")
         claims = build_service_claims(principal, ttl)
@@ -103,22 +129,36 @@ class Authub:
 
     @property
     def current_user(self) -> PrincipalDependency:
+        """FastAPI dependency that requires a valid user JWT and returns the ``Principal``."""
         return make_principal_dependency(self, PrincipalType.USER)
 
     @property
     def current_principal(self) -> PrincipalDependency:
+        """FastAPI dependency that accepts any valid JWT (user or service).
+
+        Returns the resolved ``Principal``.
+        """
         return make_principal_dependency(self)
 
     def require_scopes(self, *scopes: str) -> PrincipalDependency:
+        """FastAPI dependency that requires the principal to hold ALL of the given scopes."""
         return make_scopes_dependency(self, scopes)
 
     def require_roles(self, *roles: str) -> PrincipalDependency:
+        """FastAPI dependency that requires the principal to hold ANY of the given roles."""
         return make_roles_dependency(self, roles)
 
     @cached_property
     def router(self) -> APIRouter:
+        """Lazily built ``APIRouter`` with login, callback, logout, and discover routes."""
         return build_router(self)
 
     def attach(self, app: FastAPI, prefix: str = "/auth") -> None:
+        """Mount the authub router and error handler onto a FastAPI application.
+
+        Args:
+            app: The FastAPI application to mount onto.
+            prefix: URL prefix for all authub routes (default ``"/auth"``).
+        """
         app.include_router(self.router, prefix=prefix)
         app.add_exception_handler(AuthubError, authub_error_handler)

@@ -9,6 +9,13 @@ from authub.stores.base import ConnectionStore, UserStore
 
 
 class InMemoryConnectionStore(ConnectionStore):
+    """In-process connection store. Suitable for tests and single-process deployments.
+
+    Args:
+        connections: Initial ``Connection`` objects to register.
+        domains: Mapping of email domain (lower-cased) to ``tenant_id`` for discovery lookups.
+    """
+
     def __init__(
         self,
         connections: Iterable[Connection] = (),
@@ -20,6 +27,7 @@ class InMemoryConnectionStore(ConnectionStore):
             self._by_id[conn.id] = conn
 
     def add(self, connection: Connection) -> None:
+        """Register or replace a connection at runtime."""
         self._by_id[connection.id] = connection
 
     async def get(self, connection_id: str) -> Connection:
@@ -48,6 +56,12 @@ class InMemoryConnectionStore(ConnectionStore):
 
 
 class InMemoryUserStore(UserStore):
+    """In-process user store keyed by ``(tenant_id, external_id)``.
+
+    On upsert, email and name are updated from the latest identity; roles are refreshed when
+    non-empty.
+    """
+
     def __init__(self) -> None:
         self._users: dict[tuple[str, str], Principal] = {}
 

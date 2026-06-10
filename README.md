@@ -9,7 +9,7 @@ Typed, composable authentication hub for FastAPI.
 - User and service JWTs with pluggable signing (HS256, Ed25519)
 - Pluggable stores (user store, connection store, revocation store) and email senders
 - Plugin hooks for identity normalization, user provisioning, and token issuance
-- Embedded dev OIDC IdP (`authub.idp.AuthubIdp`) for local development without a real IdP
+- Embedded OIDC IdP (`authub.idp.AuthubIdp`) — a production-grade OIDC provider with injectable signing keys and pluggable stores
 
 ## Installation
 
@@ -69,9 +69,11 @@ auth.attach(app)
 After `auth.attach(app)`, the following routes are registered under `/auth`:
 
 - `GET /auth/{connection_id}/login` — start the OAuth2/OIDC/SAML flow
-- `GET /auth/{connection_id}/callback` — receive the IdP callback
-- `POST /auth/token/verify` — verify and inspect a token
+- `GET|POST /auth/{connection_id}/callback` — receive the IdP callback (POST is for SAML ACS)
+- `GET /auth/discover` — list connections for an email address
 - `POST /auth/logout` — revoke the current token (if revocation store configured)
+
+To verify a token programmatically: `claims = await hub.verify_token(token)`
 
 ## Connections
 
@@ -112,7 +114,7 @@ github_conn = Connection(
 `authub.presets` provides one-liner constructors for common IdPs:
 
 ```python
-from authub.presets import google, github, okta, auth0, entra, gitlab, dev_idp
+from authub.presets import google, github, okta, auth0, entra, gitlab, authub_idp
 ```
 
 | Helper | Protocol | Notes |
@@ -123,7 +125,7 @@ from authub.presets import google, github, okta, auth0, entra, gitlab, dev_idp
 | `auth0(domain, client_id, client_secret)` | OIDC | `https://{domain}` |
 | `entra(tenant_id, client_id, client_secret)` | OIDC | Azure AD / Entra |
 | `gitlab(client_id, client_secret, base_url)` | OIDC | default `gitlab.com` |
-| `dev_idp(issuer, client_id, client_secret)` | OIDC | points at the embedded dev IdP |
+| `authub_idp(issuer, client_id, client_secret)` | OIDC | points at the embedded AuthubIdp |
 
 ## Plugins
 
@@ -154,31 +156,42 @@ Available hooks:
 - `before_issue_token(claims, principal, identity)` — mutate JWT payload before signing
 - `on_token_verify(claims)` — called on every successful token verification
 
-## Dev OIDC IdP
+## Embedded OIDC IdP
 
-`AuthubIdp` is a fully functional OIDC provider for local development. Mount it alongside your app so you can test the full login flow without a real IdP.
+`AuthubIdp` is a full OIDC provider (authorization code + PKCE, RS256 ID tokens, `/userinfo`) that you can mount alongside your FastAPI app. It is suitable for production when configured correctly.
+
+### Production checklist
+
+- **Pass a persistent `signing_key`** — a PEM-encoded RSA private key. Without it, an ephemeral key is generated on each startup, invalidating existing tokens and breaking multi-instance deployments.
+- **Provide a durable `IdpUserStore`** — `InMemoryIdpUserStore` loses users on restart.
+- **Provide a durable `IdpGrantStore`** for multi-instance deployments — `InMemoryIdpGrantStore` is per-process and will cause cross-instance token failures.
+
+### Current limitations
+
+- Authorization code flow only (`response_type=code`); no implicit, device, or client-credentials flows.
+- No refresh tokens.
+- No consent screen.
+- Login throttling (`max_login_attempts`, `lockout_seconds`) is tracked per-instance in memory.
+
+### Example
 
 ```python
+import os
 from fastapi import FastAPI
 from pydantic import SecretStr
 
 from authub import Authub, Connection
 from authub.idp import AuthubIdp, IdpClient, InMemoryIdpUserStore
-from authub.presets import dev_idp
+from authub.presets import authub_idp
 from authub.stores.memory import InMemoryConnectionStore
 from authub.tokens.jwt import JwtTokenService
 
-IDP_ISSUER = "http://localhost:8000/idp"
-CLIENT_ID = "dev-client"
-CLIENT_SECRET = "dev-secret"
+IDP_ISSUER = "https://auth.example.com/idp"
+CLIENT_ID = "myapp"
+CLIENT_SECRET = "change-me"
 
 idp_users = InMemoryIdpUserStore()
-idp_users.add_user(
-    "alice",
-    "password",
-    email="alice@example.com",
-    name="Alice Dev",
-)
+idp_users.add_user("alice", "password", email="alice@example.com", name="Alice")
 
 idp = AuthubIdp(
     issuer=IDP_ISSUER,
@@ -186,19 +199,20 @@ idp = AuthubIdp(
         IdpClient(
             client_id=CLIENT_ID,
             client_secret=SecretStr(CLIENT_SECRET),
-            redirect_uris=["http://localhost:8000/auth/dev/callback"],
+            redirect_uris=["https://app.example.com/auth/myidp/callback"],
         )
     ],
     users=idp_users,
+    signing_key=os.environ["IDP_SIGNING_KEY_PEM"],
 )
 
 connections = InMemoryConnectionStore(
     connections=[
         Connection(
-            id="dev",
-            tenant_id="local",
-            display_name="Dev IdP",
-            settings=dev_idp(
+            id="myidp",
+            tenant_id="acme",
+            display_name="authub IdP",
+            settings=authub_idp(
                 issuer=IDP_ISSUER,
                 client_id=CLIENT_ID,
                 client_secret=CLIENT_SECRET,
@@ -209,7 +223,7 @@ connections = InMemoryConnectionStore(
 
 auth = Authub(
     connections=connections,
-    tokens=JwtTokenService.hs256(secret="dev-secret-must-be-32-chars-long!"),
+    tokens=JwtTokenService.hs256(secret="secret-must-be-32-chars-long!!!"),
     state_secret="state-secret-must-be-32-chars!!",
 )
 
@@ -218,13 +232,13 @@ app.include_router(idp.router, prefix="/idp")
 auth.attach(app)
 ```
 
-`AuthubIdp` is for local development only. Do not expose it in production.
-
 ## SAML
 
 Install `authub[saml]` and ensure `xmlsec1` is on your `PATH` (available via OS package managers; not available on Windows without WSL).
 
 ```python
+from pydantic import AnyHttpUrl
+
 from authub import Connection
 from authub.models import SamlSettings
 
@@ -234,7 +248,7 @@ saml_conn = Connection(
     display_name="Corporate SSO",
     settings=SamlSettings(
         sp_entity_id="https://app.example.com/auth/corp-saml/metadata",
-        idp_metadata_url="https://idp.example.com/saml/metadata",  # type: ignore[arg-type]
+        idp_metadata_url=AnyHttpUrl("https://idp.example.com/saml/metadata"),
         want_assertions_signed=True,
     ),
 )

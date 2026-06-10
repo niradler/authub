@@ -15,11 +15,19 @@ if TYPE_CHECKING:
 
 
 class PrincipalMiddleware(BaseHTTPMiddleware):
+    """Starlette middleware that eagerly resolves the token on every request.
+
+    On success, sets ``request.state.principal`` to the ``Principal``; sets it to ``None`` when
+    the token is absent or invalid. Does not reject unauthenticated requests — use the FastAPI
+    dependency helpers for that.
+    """
+
     def __init__(self, app: ASGIApp, hub: Authub) -> None:
         super().__init__(app)
         self._hub = hub
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """Verify any presented token and populate ``request.state.principal``."""
         request.state.principal = None
         pair = extract_token(request, self._hub)
         if pair is not None:
