@@ -28,6 +28,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev --all-extras
 
+      - name: Install xmlsec1 (SAML tests)
+        run: sudo apt-get update && sudo apt-get install -y xmlsec1
+
       - name: Lint & type-check
         run: |
           uv run ruff format --check .
