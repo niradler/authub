@@ -20,7 +20,7 @@ _CONCURRENCY_BUDGET_S = 30.0
 _CONCURRENT_LOGINS = 50
 
 
-async def _median(values: list[float]) -> float:
+def _median(values: list[float]) -> float:
     sorted_vals = sorted(values)
     mid = len(sorted_vals) // 2
     if len(sorted_vals) % 2 == 1:
@@ -42,7 +42,7 @@ async def test_jwks_latency_budget() -> None:
             assert resp.status_code == 200
             samples.append(elapsed_ms)
 
-    med = await _median(samples)
+    med = _median(samples)
     print(f"\n[perf] /jwks median={med:.1f}ms budget={_JWKS_BUDGET_MS}ms")
     assert med < _JWKS_BUDGET_MS, f"/jwks median {med:.1f}ms exceeded budget {_JWKS_BUDGET_MS}ms"
 
@@ -67,7 +67,7 @@ async def test_userinfo_latency_budget() -> None:
             assert resp.status_code == 200
             samples.append(elapsed_ms)
 
-    med = await _median(samples)
+    med = _median(samples)
     print(f"\n[perf] /userinfo median={med:.1f}ms budget={_USERINFO_BUDGET_MS}ms")
     assert med < _USERINFO_BUDGET_MS, (
         f"/userinfo median {med:.1f}ms exceeded budget {_USERINFO_BUDGET_MS}ms"
@@ -94,7 +94,7 @@ async def test_token_exchange_latency_budget() -> None:
             assert resp.get("access_token") is not None
             samples.append(elapsed_ms)
 
-    med = await _median(samples)
+    med = _median(samples)
     print(f"\n[perf] token exchange median={med:.1f}ms budget={_TOKEN_EXCHANGE_BUDGET_MS}ms")
     assert med < _TOKEN_EXCHANGE_BUDGET_MS, (
         f"token exchange median {med:.1f}ms exceeded budget {_TOKEN_EXCHANGE_BUDGET_MS}ms"
@@ -193,6 +193,6 @@ async def test_refresh_rotation_latency_budget() -> None:
             current_rt = str(rotated["refresh_token"])
             samples.append(elapsed_ms)
 
-    med = await _median(samples)
+    med = _median(samples)
     print(f"\n[perf] refresh rotation median={med:.1f}ms budget={budget_ms}ms")
     assert med < budget_ms, f"refresh rotation median {med:.1f}ms exceeded budget {budget_ms}ms"

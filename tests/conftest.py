@@ -2,18 +2,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from collections.abc import AsyncIterator
-from urllib.parse import parse_qs, urlsplit
 
 import httpx
-import pytest
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from pydantic import SecretStr
 
-from authub import Authub, IdentityProvider, Mapping, Principal, presets
 from authub.idp import AuthubIdp, IdpClient, IdpGrantStore, InMemoryIdpUserStore
-from authub.stores.memory import InMemoryIdentityProviderStore
-from authub.tokens.jwt import JwtTokenService
 
 ISSUER = "http://testserver/idp"
 REDIRECT = "http://app.test/cb"
@@ -152,61 +146,3 @@ async def rotate_refresh(
     resp = await client.post("/idp/token", data=data)
     result: dict[str, object] = resp.json()
     return result
-
-
-def parse_authorize_params_from_location(location: str) -> dict[str, str]:
-    parts = urlsplit(location)
-    return {k: v[0] for k, v in parse_qs(parts.query).items()}
-
-
-@pytest.fixture
-async def hub_client() -> AsyncIterator[tuple[httpx.AsyncClient, Authub]]:
-    users = InMemoryIdpUserStore()
-    users.add_user(
-        "alice",
-        "wonderland",
-        sub="alice-sub",
-        email="alice@acme.test",
-        name="Alice",
-        extra_claims={"email_verified": True},
-    )
-    idp = AuthubIdp(
-        issuer=ISSUER,
-        clients=[
-            IdpClient(
-                client_id="authub-app",
-                client_secret=SecretStr("dev-secret"),
-                redirect_uris=["http://testserver/auth/authub-idp/callback"],
-            )
-        ],
-        users=users,
-    )
-    identity_providers = InMemoryIdentityProviderStore(
-        [
-            IdentityProvider(
-                id="authub-idp",
-                tenant_id="acme",
-                display_name="Dev IdP",
-                settings=presets.authub_idp(ISSUER, "authub-app", "dev-secret"),
-                mapping=Mapping(),
-            )
-        ],
-        domains={"acme.test": "acme"},
-    )
-    auth = Authub(
-        identity_providers=identity_providers,
-        tokens=JwtTokenService.ed25519(),
-        state_secret="x" * 32,
-    )
-    app = FastAPI()
-    auth.attach(app)
-    app.include_router(idp.router, prefix="/idp")
-
-    @app.get("/me")
-    async def me(principal: Principal = Depends(auth.current_user)) -> Principal:  # noqa: B008
-        return principal
-
-    transport = httpx.ASGITransport(app=app)
-    auth.http.transport = transport
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
-        yield c, auth
