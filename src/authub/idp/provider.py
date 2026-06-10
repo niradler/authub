@@ -18,12 +18,13 @@ from joserfc.jwk import KeySet, KeySetSerialization, RSAKey
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from authub.idp.models import AuthCode, IdpClient, IdpUser
+from authub.idp.models import AuthCode, IdpClient, IdpUser, RefreshToken
 from authub.idp.store import (
     IdpGrantStore,
     IdpUserStore,
     InMemoryIdpGrantStore,
     InMemoryIdpUserStore,
+    RefreshRotateOutcome,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,28 @@ _AUTHORIZE_FIELDS = (
     "code_challenge",
     "code_challenge_method",
 )
+
+
+_SCOPE_CLAIM_MAP: dict[str, tuple[str, ...]] = {
+    "email": ("email", "email_verified"),
+    "profile": ("name", "given_name", "family_name", "preferred_username", "picture"),
+}
+
+
+def _filter_claims_by_scope(claims: dict[str, Any], scope: str) -> dict[str, Any]:
+    """Return a subset of claims permitted by the granted scope.
+
+    Always includes sub when present. Scope tokens not in _SCOPE_CLAIM_MAP contribute nothing.
+    openid is the required base scope and grants only sub (which is handled at the call site).
+    """
+    scopes = set(scope.split())
+    result: dict[str, Any] = {}
+    for scope_name, claim_names in _SCOPE_CLAIM_MAP.items():
+        if scope_name in scopes:
+            for claim in claim_names:
+                if claim in claims:
+                    result[claim] = claims[claim]
+    return result
 
 
 def _s256(verifier: str) -> str:
@@ -79,6 +102,7 @@ class AuthubIdp:
         auto_login: str | None = None,
         code_ttl_seconds: int = 60,
         token_ttl_seconds: int = 3600,
+        refresh_token_ttl_seconds: int = 1209600,
         max_login_attempts: int = 5,
         lockout_seconds: int = 300,
     ) -> None:
@@ -94,6 +118,7 @@ class AuthubIdp:
             auto_login: Username to authenticate without showing the login form.
             code_ttl_seconds: Authorization code lifetime in seconds.
             token_ttl_seconds: Access/ID token lifetime in seconds.
+            refresh_token_ttl_seconds: Refresh token lifetime in seconds. Defaults to 14 days.
             max_login_attempts: Failed attempts before a username is locked out.
             lockout_seconds: How long a locked-out username must wait.
         """
@@ -105,6 +130,7 @@ class AuthubIdp:
         self.auto_login = auto_login
         self._code_ttl = code_ttl_seconds
         self._token_ttl = token_ttl_seconds
+        self._refresh_token_ttl = refresh_token_ttl_seconds
         self._max_attempts = max_login_attempts
         self._lockout_seconds = lockout_seconds
         self._login_failures: dict[str, tuple[int, float]] = {}
@@ -228,6 +254,20 @@ class AuthubIdp:
             {"alg": "RS256", "kid": self._key.kid}, payload, self._key, algorithms=["RS256"]
         )
 
+    def _make_refresh_id_token(self, rt: RefreshToken, user: IdpUser) -> str:
+        now = int(time.time())
+        payload: dict[str, Any] = {
+            "iss": self.issuer,
+            "sub": user.sub,
+            "aud": rt.client_id,
+            "iat": now,
+            "exp": now + self._token_ttl,
+            **user.claims,
+        }
+        return jwt.encode(
+            {"alg": "RS256", "kid": self._key.kid}, payload, self._key, algorithms=["RS256"]
+        )
+
     @cached_property
     def router(self) -> APIRouter:
         router = APIRouter(tags=["authub-idp"])
@@ -241,10 +281,10 @@ class AuthubIdp:
                 "jwks_uri": f"{self.issuer}/jwks",
                 "userinfo_endpoint": f"{self.issuer}/userinfo",
                 "response_types_supported": ["code"],
-                "grant_types_supported": ["authorization_code"],
+                "grant_types_supported": ["authorization_code", "refresh_token"],
                 "subject_types_supported": ["public"],
                 "id_token_signing_alg_values_supported": ["RS256"],
-                "scopes_supported": ["openid", "email", "profile"],
+                "scopes_supported": ["openid", "email", "profile", "offline_access"],
                 "code_challenge_methods_supported": ["S256"],
                 "token_endpoint_auth_methods_supported": [
                     "client_secret_basic",
@@ -307,9 +347,16 @@ class AuthubIdp:
             client = self._authenticate_client(request, form)
             if client is None:
                 return JSONResponse({"error": "invalid_client"}, status_code=401)
-            if form.get("grant_type") != "authorization_code":
-                return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
+            grant_type = form.get("grant_type", "")
+
+            if grant_type == "authorization_code":
+                return await _handle_authorization_code(client, form)
+            if grant_type == "refresh_token":
+                return await _handle_refresh_token(client, form)
+            return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+
+        async def _handle_authorization_code(client: IdpClient, form: dict[str, str]) -> Response:
             auth_code = await self._grants.consume_code(form.get("code", ""))
             if (
                 auth_code is None
@@ -328,15 +375,76 @@ class AuthubIdp:
 
             access_token = secrets.token_urlsafe(32)
             await self._grants.save_access_token(
-                access_token, user.sub, int(time.time()) + self._token_ttl
+                access_token, user.sub, int(time.time()) + self._token_ttl, auth_code.scope
             )
+            body: dict[str, Any] = {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": self._token_ttl,
+                "scope": auth_code.scope,
+                "id_token": self._make_id_token(auth_code, user),
+            }
+            if "offline_access" in auth_code.scope.split():
+                rt = RefreshToken(
+                    token=secrets.token_urlsafe(32),
+                    sub=user.sub,
+                    client_id=client.client_id,
+                    scope=auth_code.scope,
+                    family_id=secrets.token_urlsafe(16),
+                    expires_at=int(time.time()) + self._refresh_token_ttl,
+                )
+                await self._grants.save_refresh_token(rt)
+                body["refresh_token"] = rt.token
+            return JSONResponse(body)
+
+        async def _handle_refresh_token(client: IdpClient, form: dict[str, str]) -> Response:
+            token_str = form.get("refresh_token", "")
+            outcome, rt = await self._grants.rotate_refresh_token(token_str)
+
+            if outcome is RefreshRotateOutcome.INVALID:
+                return JSONResponse({"error": "invalid_grant"}, status_code=400)
+            if outcome is RefreshRotateOutcome.REUSE:
+                return JSONResponse({"error": "invalid_grant"}, status_code=400)
+
+            assert rt is not None
+            if rt.client_id != client.client_id:
+                return JSONResponse({"error": "invalid_grant"}, status_code=400)
+
+            effective_scope = rt.scope
+            requested_scope = form.get("scope", "").strip()
+            if requested_scope:
+                requested_set = set(requested_scope.split())
+                stored_set = set(rt.scope.split())
+                if not requested_set.issubset(stored_set):
+                    return JSONResponse({"error": "invalid_scope"}, status_code=400)
+                effective_scope = requested_scope
+
+            user = await self.users.get_by_sub(rt.sub)
+            if user is None:
+                return JSONResponse({"error": "invalid_grant"}, status_code=400)
+
+            new_access_token = secrets.token_urlsafe(32)
+            await self._grants.save_access_token(
+                new_access_token, user.sub, int(time.time()) + self._token_ttl, effective_scope
+            )
+            new_rt = RefreshToken(
+                token=secrets.token_urlsafe(32),
+                sub=user.sub,
+                client_id=client.client_id,
+                scope=effective_scope,
+                family_id=rt.family_id,
+                expires_at=int(time.time()) + self._refresh_token_ttl,
+            )
+            await self._grants.save_refresh_token(new_rt)
+
             return JSONResponse(
                 {
-                    "access_token": access_token,
+                    "access_token": new_access_token,
                     "token_type": "Bearer",
                     "expires_in": self._token_ttl,
-                    "scope": auth_code.scope,
-                    "id_token": self._make_id_token(auth_code, user),
+                    "scope": effective_scope,
+                    "refresh_token": new_rt.token,
+                    "id_token": self._make_refresh_id_token(rt, user),
                 }
             )
 
@@ -347,10 +455,12 @@ class AuthubIdp:
             entry = await self._grants.get_access_token(token_value)
             if entry is None:
                 return JSONResponse({"error": "invalid_token"}, status_code=401)
-            user = await self.users.get_by_sub(entry[0])
+            sub, _exp, scope = entry
+            user = await self.users.get_by_sub(sub)
             if user is None:
                 return JSONResponse({"error": "invalid_token"}, status_code=401)
-            return JSONResponse({"sub": user.sub, **user.claims})
+            filtered = _filter_claims_by_scope(user.claims, scope)
+            return JSONResponse({"sub": user.sub, **filtered})
 
         return router
 

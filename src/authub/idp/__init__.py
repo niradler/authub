@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from authub.idp.models import IdpClient, IdpUser
+from authub.idp.models import IdpClient, IdpUser, RefreshToken
 from authub.idp.provider import AuthubIdp
 from authub.idp.store import (
     IdpGrantStore,
     IdpUserStore,
     InMemoryIdpGrantStore,
     InMemoryIdpUserStore,
+    RefreshRotateOutcome,
 )
 
 __all__ = [
@@ -17,4 +18,6 @@ __all__ = [
     "IdpUserStore",
     "InMemoryIdpGrantStore",
     "InMemoryIdpUserStore",
+    "RefreshRotateOutcome",
+    "RefreshToken",
 ]

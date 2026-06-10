@@ -27,3 +27,14 @@ class AuthCode(BaseModel):
     nonce: str | None
     code_challenge: str | None
     expires_at: int
+
+
+class RefreshToken(BaseModel):
+    """A long-lived refresh token issued when offline_access scope is granted."""
+
+    token: str
+    sub: str
+    client_id: str
+    scope: str
+    family_id: str
+    expires_at: int

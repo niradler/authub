@@ -7,11 +7,20 @@ import secrets
 import time
 import uuid
 from abc import ABC, abstractmethod
+from enum import StrEnum
 from typing import Any
 
-from authub.idp.models import AuthCode, IdpUser
+from authub.idp.models import AuthCode, IdpUser, RefreshToken
 
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1
+
+
+class RefreshRotateOutcome(StrEnum):
+    """Result of a rotate/consume operation on a refresh token."""
+
+    ACTIVE = "active"
+    REUSE = "reuse"
+    INVALID = "invalid"
 
 
 def hash_password(password: str) -> str:
@@ -41,11 +50,13 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 class IdpGrantStore(ABC):
-    """Store for authorization codes and access tokens.
+    """Store for authorization codes, access tokens, and refresh tokens.
 
     Implementations must be safe for concurrent async access.
     consume_code must be atomic: each code can be redeemed at most once.
     All retrieval methods must return None for expired entries.
+    rotate_refresh_token must be atomic: ACTIVE marks the token consumed in
+    the same operation that returns it; REUSE immediately revokes the family.
     """
 
     @abstractmethod
@@ -59,13 +70,36 @@ class IdpGrantStore(ABC):
         ...
 
     @abstractmethod
-    async def save_access_token(self, token: str, sub: str, expires_at: int) -> None:
-        """Persist an access token with its subject and expiry epoch."""
+    async def save_access_token(self, token: str, sub: str, expires_at: int, scope: str) -> None:
+        """Persist an access token with its subject, expiry epoch, and granted scope."""
         ...
 
     @abstractmethod
-    async def get_access_token(self, token: str) -> tuple[str, int] | None:
-        """Return (sub, expires_at) for a non-expired token, or None."""
+    async def get_access_token(self, token: str) -> tuple[str, int, str] | None:
+        """Return (sub, expires_at, scope) for a non-expired token, or None."""
+        ...
+
+    @abstractmethod
+    async def save_refresh_token(self, rt: RefreshToken) -> None:
+        """Persist a new refresh token."""
+        ...
+
+    @abstractmethod
+    async def rotate_refresh_token(
+        self, token: str
+    ) -> tuple[RefreshRotateOutcome, RefreshToken | None]:
+        """Consume a refresh token and return the outcome with its data.
+
+        Returns:
+            (ACTIVE, RefreshToken): token was valid and is now consumed (single-use).
+            (REUSE, None): token was already consumed; the entire family is revoked.
+            (INVALID, None): token unknown, expired, or its family is revoked.
+        """
+        ...
+
+    @abstractmethod
+    async def revoke_refresh_family(self, family_id: str) -> None:
+        """Revoke all refresh tokens belonging to a family."""
         ...
 
 
@@ -74,7 +108,10 @@ class InMemoryIdpGrantStore(IdpGrantStore):
 
     def __init__(self) -> None:
         self._codes: dict[str, AuthCode] = {}
-        self._access_tokens: dict[str, tuple[str, int]] = {}
+        self._access_tokens: dict[str, tuple[str, int, str]] = {}
+        self._refresh_tokens: dict[str, RefreshToken] = {}
+        self._consumed_tokens: dict[str, RefreshToken] = {}
+        self._revoked_families: set[str] = set()
 
     async def save_code(self, code: AuthCode) -> None:
         self._evict_expired_codes()
@@ -86,15 +123,44 @@ class InMemoryIdpGrantStore(IdpGrantStore):
             return None
         return entry
 
-    async def save_access_token(self, token: str, sub: str, expires_at: int) -> None:
+    async def save_access_token(self, token: str, sub: str, expires_at: int, scope: str) -> None:
         self._evict_expired_tokens()
-        self._access_tokens[token] = (sub, expires_at)
+        self._access_tokens[token] = (sub, expires_at, scope)
 
-    async def get_access_token(self, token: str) -> tuple[str, int] | None:
+    async def get_access_token(self, token: str) -> tuple[str, int, str] | None:
         entry = self._access_tokens.get(token)
         if entry is None or entry[1] <= int(time.time()):
             return None
         return entry
+
+    async def save_refresh_token(self, rt: RefreshToken) -> None:
+        self._evict_expired_refresh_families()
+        self._refresh_tokens[rt.token] = rt
+
+    async def rotate_refresh_token(
+        self, token: str
+    ) -> tuple[RefreshRotateOutcome, RefreshToken | None]:
+        now = int(time.time())
+
+        if token in self._consumed_tokens:
+            rt = self._consumed_tokens[token]
+            await self.revoke_refresh_family(rt.family_id)
+            return RefreshRotateOutcome.REUSE, None
+
+        if token not in self._refresh_tokens:
+            return RefreshRotateOutcome.INVALID, None
+        rt = self._refresh_tokens.pop(token)
+        if rt.expires_at <= now or rt.family_id in self._revoked_families:
+            return RefreshRotateOutcome.INVALID, None
+
+        self._consumed_tokens[token] = rt
+        return RefreshRotateOutcome.ACTIVE, rt
+
+    async def revoke_refresh_family(self, family_id: str) -> None:
+        self._revoked_families.add(family_id)
+        dead = [t for t, rt in self._refresh_tokens.items() if rt.family_id == family_id]
+        for t in dead:
+            self._consumed_tokens[t] = self._refresh_tokens.pop(t)
 
     def _evict_expired_codes(self) -> None:
         now = int(time.time())
@@ -107,6 +173,15 @@ class InMemoryIdpGrantStore(IdpGrantStore):
         expired = [k for k, v in self._access_tokens.items() if v[1] <= now]
         for k in expired:
             del self._access_tokens[k]
+
+    def _evict_expired_refresh_families(self) -> None:
+        now = int(time.time())
+        expired_consumed = [t for t, rt in self._consumed_tokens.items() if rt.expires_at <= now]
+        for t in expired_consumed:
+            del self._consumed_tokens[t]
+        expired_active = [t for t, rt in self._refresh_tokens.items() if rt.expires_at <= now]
+        for t in expired_active:
+            del self._refresh_tokens[t]
 
 
 class IdpUserStore(ABC):

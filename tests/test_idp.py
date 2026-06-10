@@ -402,6 +402,32 @@ async def test_brute_force_clears_after_window(monkeypatch: pytest.MonkeyPatch) 
     assert unlocked.status_code == 302
 
 
+async def get_code_with_scope(client: httpx.AsyncClient, scope: str) -> str:
+    params = {**AUTHORIZE_PARAMS, "scope": scope}
+    login = await client.post(
+        "/idp/login",
+        data={**params, "username": "alice", "password": "wonderland"},
+    )
+    return login.headers["location"].split("code=")[1].split("&")[0]
+
+
+async def exchange_code(
+    client: httpx.AsyncClient, code: str, *, extra: dict[str, str] | None = None
+) -> dict[str, object]:
+    data: dict[str, str] = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": REDIRECT,
+        "code_verifier": "v" * 43,
+        "client_id": "app",
+        "client_secret": "shh",
+        **(extra or {}),
+    }
+    resp = await client.post("/idp/token", data=data)
+    result: dict[str, object] = resp.json()
+    return result
+
+
 async def test_successful_login_clears_failure_counter() -> None:
     idp = make_idp(max_login_attempts=3, lockout_seconds=300)
     async with make_client(idp) as client:
@@ -435,3 +461,214 @@ async def test_successful_login_clears_failure_counter() -> None:
             data={**AUTHORIZE_PARAMS, "username": "alice", "password": "wonderland"},
         )
     assert still_ok.status_code == 302
+
+
+# ---------------------------------------------------------------------------
+# Feature A: refresh-token rotation with reuse detection
+# ---------------------------------------------------------------------------
+
+
+async def test_offline_access_scope_yields_refresh_token() -> None:
+    async with make_client(make_idp()) as client:
+        code = await get_code_with_scope(client, "openid email offline_access")
+        payload = await exchange_code(client, code)
+    assert "refresh_token" in payload
+    assert isinstance(payload["refresh_token"], str)
+
+
+async def test_no_offline_access_no_refresh_token() -> None:
+    async with make_client(make_idp()) as client:
+        code = await get_code_with_scope(client, "openid email")
+        payload = await exchange_code(client, code)
+    assert "refresh_token" not in payload
+
+
+async def test_refresh_grant_returns_new_tokens() -> None:
+    idp = make_idp()
+    async with make_client(idp) as client:
+        code = await get_code_with_scope(client, "openid email offline_access")
+        first = await exchange_code(client, code)
+        assert "refresh_token" in first
+
+        refresh_resp = await client.post(
+            "/idp/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": first["refresh_token"],
+                "client_id": "app",
+                "client_secret": "shh",
+            },
+        )
+    assert refresh_resp.status_code == 200
+    second = refresh_resp.json()
+    assert "access_token" in second
+    assert "refresh_token" in second
+    assert "id_token" in second
+    assert second["access_token"] != first["access_token"]
+    assert second["refresh_token"] != first["refresh_token"]
+
+    jwks = KeySet.import_key_set(idp.jwks())
+    decoded = jwt.decode(second["id_token"], jwks, algorithms=["RS256"])
+    assert decoded.claims["sub"] is not None
+
+
+async def test_refresh_token_reuse_revokes_family() -> None:
+    async with make_client(make_idp()) as client:
+        code = await get_code_with_scope(client, "openid offline_access")
+        first = await exchange_code(client, code)
+        original_rt = first["refresh_token"]
+
+        rotate_resp = await client.post(
+            "/idp/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": original_rt,
+                "client_id": "app",
+                "client_secret": "shh",
+            },
+        )
+        assert rotate_resp.status_code == 200
+        rotated = rotate_resp.json()
+        new_rt = rotated["refresh_token"]
+
+        replay_resp = await client.post(
+            "/idp/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": original_rt,
+                "client_id": "app",
+                "client_secret": "shh",
+            },
+        )
+        assert replay_resp.status_code == 400
+        assert replay_resp.json()["error"] == "invalid_grant"
+
+        family_revoked_resp = await client.post(
+            "/idp/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": new_rt,
+                "client_id": "app",
+                "client_secret": "shh",
+            },
+        )
+        assert family_revoked_resp.status_code == 400
+        assert family_revoked_resp.json()["error"] == "invalid_grant"
+
+
+async def test_refresh_token_wrong_client_rejected() -> None:
+    users = InMemoryIdpUserStore()
+    users.add_user("alice", "wonderland", email="alice@acme.test", name="Alice")
+    idp = AuthubIdp(
+        issuer=ISSUER,
+        clients=[
+            IdpClient(client_id="app", client_secret=SecretStr("shh"), redirect_uris=[REDIRECT]),
+            IdpClient(
+                client_id="other",
+                client_secret=SecretStr("othersecret"),
+                redirect_uris=[REDIRECT],
+            ),
+        ],
+        users=users,
+    )
+    async with make_client(idp) as client:
+        code = await get_code_with_scope(client, "openid offline_access")
+        first = await exchange_code(client, code)
+        rt = first["refresh_token"]
+
+        wrong_client_resp = await client.post(
+            "/idp/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+                "client_id": "other",
+                "client_secret": "othersecret",
+            },
+        )
+    assert wrong_client_resp.status_code == 400
+    assert wrong_client_resp.json()["error"] == "invalid_grant"
+
+
+async def test_refresh_token_scope_narrowing_works() -> None:
+    async with make_client(make_idp()) as client:
+        code = await get_code_with_scope(client, "openid email offline_access")
+        first = await exchange_code(client, code)
+        rt = first["refresh_token"]
+
+        resp = await client.post(
+            "/idp/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+                "scope": "openid",
+                "client_id": "app",
+                "client_secret": "shh",
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json()["scope"] == "openid"
+
+
+async def test_refresh_token_scope_broadening_rejected() -> None:
+    async with make_client(make_idp()) as client:
+        code = await get_code_with_scope(client, "openid offline_access")
+        first = await exchange_code(client, code)
+        rt = first["refresh_token"]
+
+        resp = await client.post(
+            "/idp/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+                "scope": "openid email profile",
+                "client_id": "app",
+                "client_secret": "shh",
+            },
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_scope"
+
+
+# ---------------------------------------------------------------------------
+# Feature B: userinfo scope filtering
+# ---------------------------------------------------------------------------
+
+
+async def test_userinfo_openid_only_returns_sub_only() -> None:
+    async with make_client(make_idp()) as client:
+        code = await get_code_with_scope(client, "openid")
+        payload = await exchange_code(client, code)
+        access_token = payload["access_token"]
+        userinfo = await client.get(
+            "/idp/userinfo", headers={"Authorization": f"Bearer {access_token}"}
+        )
+    data = userinfo.json()
+    assert "sub" in data
+    assert "email" not in data
+    assert "name" not in data
+
+
+async def test_userinfo_email_scope_adds_email() -> None:
+    async with make_client(make_idp()) as client:
+        code = await get_code_with_scope(client, "openid email")
+        payload = await exchange_code(client, code)
+        access_token = payload["access_token"]
+        userinfo = await client.get(
+            "/idp/userinfo", headers={"Authorization": f"Bearer {access_token}"}
+        )
+    data = userinfo.json()
+    assert data["email"] == "alice@acme.test"
+    assert "name" not in data
+
+
+async def test_userinfo_profile_scope_adds_name() -> None:
+    async with make_client(make_idp()) as client:
+        code = await get_code_with_scope(client, "openid email profile")
+        payload = await exchange_code(client, code)
+        access_token = payload["access_token"]
+        userinfo = await client.get(
+            "/idp/userinfo", headers={"Authorization": f"Bearer {access_token}"}
+        )
+    data = userinfo.json()
+    assert data["email"] == "alice@acme.test"
+    assert data["name"] == "Alice"
