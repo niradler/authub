@@ -40,7 +40,7 @@ Always pass explicit timeouts on shell commands. SAML tests skip on this Windows
 
 - Commits: conventional (`feat:`/`test:`/`chore:`), imperative. **NEVER add AI attribution of any
   kind** — no "Generated with Claude Code", no "Co-Authored-By: Claude", no emoji footers.
-- Never publish to PyPI (`uv publish`) — Nir does that manually.
+- Publish to PyPI manually with `uv publish` — never via GitHub Actions / CI.
 - `refs/` holds read-only reference checkouts for API
   shape only. **Never copy code from them** (licensing); never lint/format/commit them.
 - Never suppress a failing test to go green; state root cause before fixing anything.
