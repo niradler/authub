@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import datetime
 import shutil
 from pathlib import Path
@@ -165,14 +166,7 @@ def idp_handle_request(idp: Server, redirect_url: str, *, sign: bool = True) -> 
         sign_assertion=sign,
         **resp_args,
     )
-    http_args = idp.apply_binding(
-        BINDING_HTTP_POST,
-        str(response_xml),
-        destination=ACS_URL,
-        relay_state="/",
-        response=True,
-    )
-    return cast(str, http_args["data"]["SAMLResponse"])
+    return base64.b64encode(str(response_xml).encode()).decode()
 
 
 async def test_full_saml_round_trip(idp: Server, settings: SamlSettings) -> None:
