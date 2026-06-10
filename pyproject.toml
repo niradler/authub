@@ -81,10 +81,6 @@ files = ["src", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = "tests.*"
-disallow_untyped_decorators = false
-
-[[tool.mypy.overrides]]
 module = ["authlib.*"]
 ignore_missing_imports = true
 
