@@ -19,6 +19,10 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 def extract_token(request: Request, hub: Authub) -> tuple[str, TokenSource] | None:
+    """Extract a bearer token from the ``Authorization`` header or session cookie.
+
+    Returns ``(token, source)`` or ``None`` when no token is present.
+    """
     header = request.headers.get("authorization", "")
     if header.lower().startswith("bearer "):
         return header[7:].strip(), "header"
@@ -47,6 +51,12 @@ def _enforce_csrf(request: Request, hub: Authub) -> None:
 def make_principal_dependency(
     hub: Authub, require_type: PrincipalType | None = None
 ) -> PrincipalDependency:
+    """Build a FastAPI dependency that verifies a JWT and optionally enforces principal type.
+
+    Raises HTTP 401 when no token is present or the token is invalid, and HTTP 403 when the
+    principal type does not match. Enforces CSRF on cookie-sourced tokens for mutating methods.
+    """
+
     async def dependency(request: Request) -> Principal:
         pair = extract_token(request, hub)
         if pair is None:
@@ -66,6 +76,7 @@ def make_principal_dependency(
 
 
 def make_scopes_dependency(hub: Authub, scopes: tuple[str, ...]) -> PrincipalDependency:
+    """Require ALL of the given scopes."""
     base = make_principal_dependency(hub)
 
     async def dependency(request: Request) -> Principal:
@@ -78,6 +89,7 @@ def make_scopes_dependency(hub: Authub, scopes: tuple[str, ...]) -> PrincipalDep
 
 
 def make_roles_dependency(hub: Authub, roles: tuple[str, ...]) -> PrincipalDependency:
+    """Require ANY of the given roles."""
     base = make_principal_dependency(hub, require_type=PrincipalType.USER)
 
     async def dependency(request: Request) -> Principal:

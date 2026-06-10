@@ -123,3 +123,20 @@ async def test_revocation_store() -> None:
     assert await store.is_revoked("j1")
     await store.revoke("j2", exp=int(time.time()) - 1)
     assert not await store.is_revoked("j2")
+
+
+async def test_revocation_store_none_exp_never_expires() -> None:
+    store = InMemoryRevocationStore()
+    await store.revoke("eternal", exp=None)
+    assert await store.is_revoked("eternal")
+    store._evict_expired()
+    assert await store.is_revoked("eternal")
+
+
+async def test_revocation_store_expired_entries_evicted_on_lookup() -> None:
+    store = InMemoryRevocationStore()
+    await store.revoke("soon", exp=int(time.time()) + 60)
+    await store.revoke("past", exp=int(time.time()) - 1)
+    assert await store.is_revoked("soon")
+    assert not await store.is_revoked("past")
+    assert "past" not in store._store

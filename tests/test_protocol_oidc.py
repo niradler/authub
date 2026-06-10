@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 import respx
 from joserfc import jwt
@@ -13,6 +15,7 @@ from starlette.requests import Request
 
 from authub.errors import InvalidStateError, ProtocolError
 from authub.models import Connection, OidcSettings
+from authub.protocols.base import HttpOptions
 from authub.protocols.oidc import OidcProtocol
 
 ISSUER = "https://idp.test"
@@ -196,6 +199,36 @@ async def test_complete_surfaces_idp_error_param() -> None:
 
 
 @respx.mock
+async def test_userinfo_cannot_override_id_token_claims() -> None:
+    mock_discovery(respx.mock)
+    protocol = OidcProtocol()
+    begin = await protocol.begin(
+        conn=make_conn(fetch_userinfo=True), callback_url="http://app/cb", return_to="/"
+    )
+    state = begin.flow_state
+    assert state.nonce
+    respx.mock.post(f"{ISSUER}/token").respond(
+        json={
+            "access_token": "at-1",
+            "token_type": "Bearer",
+            "id_token": make_id_token(nonce=state.nonce, email="real@b.co"),
+        }
+    )
+    respx.mock.get(f"{ISSUER}/userinfo").respond(
+        json={"sub": "user-1", "email": "attacker@evil.com", "extra": "bonus"}
+    )
+    request = get_request(f"http://app/cb?code=c1&state={state.state}")
+    raw = await protocol.complete(
+        request=request,
+        conn=make_conn(fetch_userinfo=True),
+        callback_url="http://app/cb",
+        flow_state=state,
+    )
+    assert raw.claims["email"] == "real@b.co"
+    assert raw.claims["extra"] == "bonus"
+
+
+@respx.mock
 async def test_discovery_issuer_mismatch_rejected() -> None:
     respx.mock.get(f"{ISSUER}/.well-known/openid-configuration").respond(
         json={"issuer": "https://evil.test", "authorization_endpoint": f"{ISSUER}/a"}
@@ -203,3 +236,75 @@ async def test_discovery_issuer_mismatch_rejected() -> None:
     protocol = OidcProtocol()
     with pytest.raises(ProtocolError, match="issuer"):
         await protocol.begin(conn=make_conn(), callback_url="http://app/cb", return_to="/")
+
+
+async def test_per_key_locks_allow_concurrent_discovery_of_different_issuers() -> None:
+    """Per-issuer locking: a slow fetch for issuer A must not block issuer B."""
+    issuer_a = "https://idp-a.test"
+    issuer_b = "https://idp-b.test"
+
+    gate = asyncio.Event()
+
+    def _meta(issuer: str) -> dict[str, Any]:
+        return {
+            "issuer": issuer,
+            "authorization_endpoint": f"{issuer}/authorize",
+            "token_endpoint": f"{issuer}/token",
+            "jwks_uri": f"{issuer}/jwks",
+        }
+
+    async def transport_handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url == f"{issuer_a}/.well-known/openid-configuration":
+            await gate.wait()
+            return httpx.Response(200, json=_meta(issuer_a))
+        if url == f"{issuer_b}/.well-known/openid-configuration":
+            return httpx.Response(200, json=_meta(issuer_b))
+        if url == f"{issuer_a}/jwks" or url == f"{issuer_b}/jwks":
+            return httpx.Response(
+                200, json=KeySet([RSAKey.generate_key(2048, auto_kid=True)]).as_dict(private=False)
+            )
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler=transport_handler)
+    http = HttpOptions()
+    http.transport = transport
+    http.timeout = 5.0
+    protocol = OidcProtocol(http=http)
+
+    conn_a = Connection(
+        id="a",
+        tenant_id="ta",
+        display_name="A",
+        settings=OidcSettings(
+            issuer=AnyHttpUrl(issuer_a),
+            client_id="c",
+            client_secret=SecretStr("s"),
+        ),
+    )
+    conn_b = Connection(
+        id="b",
+        tenant_id="tb",
+        display_name="B",
+        settings=OidcSettings(
+            issuer=AnyHttpUrl(issuer_b),
+            client_id="c",
+            client_secret=SecretStr("s"),
+        ),
+    )
+
+    task_a = asyncio.create_task(
+        protocol.begin(conn=conn_a, callback_url="http://app/cb", return_to="/")
+    )
+
+    await asyncio.sleep(0)
+
+    result_b = await asyncio.wait_for(
+        protocol.begin(conn=conn_b, callback_url="http://app/cb", return_to="/"),
+        timeout=2.0,
+    )
+    assert result_b.redirect_url.startswith(f"{issuer_b}/authorize")
+
+    gate.set()
+    result_a = await asyncio.wait_for(task_a, timeout=2.0)
+    assert result_a.redirect_url.startswith(f"{issuer_a}/authorize")

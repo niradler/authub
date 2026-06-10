@@ -20,6 +20,8 @@ ID_TOKEN_ALGS = ["RS256", "RS384", "RS512", "PS256", "ES256", "ES384", "ES512", 
 
 
 class OidcProtocol(AuthProtocol):
+    """OpenID Connect authorization-code + PKCE protocol with discovery and JWKS caching."""
+
     kind = "oidc"
 
     def __init__(self, http: HttpOptions | None = None, metadata_ttl: int = 3600) -> None:
@@ -27,42 +29,43 @@ class OidcProtocol(AuthProtocol):
         self._metadata_ttl = metadata_ttl
         self._metadata_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._jwks_cache: dict[str, tuple[float, KeySet]] = {}
-        self._cache_lock = asyncio.Lock()
+        self._discovery_locks: dict[str, asyncio.Lock] = {}
+        self._jwks_locks: dict[str, asyncio.Lock] = {}
 
     async def _discover(self, issuer: str) -> dict[str, Any]:
         issuer = issuer.rstrip("/")
-        async with self._cache_lock:
+        lock = self._discovery_locks.setdefault(issuer, asyncio.Lock())
+        async with lock:
             cached = self._metadata_cache.get(issuer)
             if cached and cached[0] > time.monotonic():
                 return cached[1]
-        url = f"{issuer}/.well-known/openid-configuration"
-        async with self._http.client() as client:
-            response = await client.get(url)
-        if response.status_code != 200:
-            raise ProtocolError("OIDC discovery failed")
-        metadata = cast(dict[str, Any], response.json())
-        if str(metadata.get("issuer", "")).rstrip("/") != issuer:
-            raise ProtocolError("issuer mismatch in discovery document")
-        async with self._cache_lock:
+            url = f"{issuer}/.well-known/openid-configuration"
+            async with self._http.client() as client:
+                response = await client.get(url)
+            if response.status_code != 200:
+                raise ProtocolError("OIDC discovery failed")
+            metadata = cast(dict[str, Any], response.json())
+            if str(metadata.get("issuer", "")).rstrip("/") != issuer:
+                raise ProtocolError("issuer mismatch in discovery document")
             self._metadata_cache[issuer] = (time.monotonic() + self._metadata_ttl, metadata)
-        return metadata
+            return metadata
 
     async def _keyset(self, metadata: dict[str, Any], force: bool = False) -> KeySet:
         jwks_uri = metadata.get("jwks_uri")
         if not isinstance(jwks_uri, str):
             raise ProtocolError("discovery document missing jwks_uri")
-        async with self._cache_lock:
+        lock = self._jwks_locks.setdefault(jwks_uri, asyncio.Lock())
+        async with lock:
             cached = self._jwks_cache.get(jwks_uri)
             if cached and cached[0] > time.monotonic() and not force:
                 return cached[1]
-        async with self._http.client() as client:
-            response = await client.get(jwks_uri)
-        if response.status_code != 200:
-            raise ProtocolError("JWKS fetch failed")
-        keyset = KeySet.import_key_set(response.json())
-        async with self._cache_lock:
+            async with self._http.client() as client:
+                response = await client.get(jwks_uri)
+            if response.status_code != 200:
+                raise ProtocolError("JWKS fetch failed")
+            keyset = KeySet.import_key_set(response.json())
             self._jwks_cache[jwks_uri] = (time.monotonic() + self._metadata_ttl, keyset)
-        return keyset
+            return keyset
 
     def _client(self, settings: OidcSettings, callback_url: str) -> AsyncOAuth2Client:
         return AsyncOAuth2Client(
@@ -81,13 +84,13 @@ class OidcProtocol(AuthProtocol):
         state = secrets.token_urlsafe(24)
         nonce = secrets.token_urlsafe(24)
         code_verifier = secrets.token_urlsafe(48)
-        async with self._client(settings, callback_url) as client:
-            url, _ = client.create_authorization_url(
-                metadata["authorization_endpoint"],
-                state=state,
-                nonce=nonce,
-                code_verifier=code_verifier,
-            )
+        client = self._client(settings, callback_url)
+        url, _ = client.create_authorization_url(
+            metadata["authorization_endpoint"],
+            state=state,
+            nonce=nonce,
+            code_verifier=code_verifier,
+        )
         return BeginResult(
             redirect_url=url,
             flow_state=FlowState(
@@ -141,7 +144,7 @@ class OidcProtocol(AuthProtocol):
             )
             if userinfo.get("sub") != claims.get("sub"):
                 raise ProtocolError("userinfo sub does not match id_token sub")
-            claims = {**claims, **userinfo}
+            claims = {**userinfo, **claims}
         return RawIdentity(claims=claims)
 
     async def _fetch_userinfo(self, endpoint: str, access_token: str) -> dict[str, Any]:

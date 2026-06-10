@@ -13,6 +13,7 @@ def build_user_claims(
     identity: CanonicalIdentity,
     ttl: timedelta,
 ) -> dict[str, Any]:
+    """Build the JWT payload for a user login. Always includes ``exp``."""
     now = int(time.time())
     return {
         "sub": principal.id,
@@ -32,6 +33,7 @@ def build_service_claims(
     principal: Principal,
     ttl: timedelta | None,
 ) -> dict[str, Any]:
+    """Build the JWT payload for a service principal. Omits ``exp`` when ``ttl`` is ``None``."""
     now = int(time.time())
     payload: dict[str, Any] = {
         "sub": principal.id,

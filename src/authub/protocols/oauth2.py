@@ -13,6 +13,8 @@ from authub.state import BeginResult, FlowState
 
 
 class OAuth2Protocol(AuthProtocol):
+    """Generic OAuth2 authorization-code + PKCE protocol with optional userinfo fetch."""
+
     kind = "oauth2"
 
     def __init__(self, http: HttpOptions | None = None) -> None:
@@ -33,10 +35,10 @@ class OAuth2Protocol(AuthProtocol):
         settings = cast(OAuth2Settings, conn.settings)
         state = secrets.token_urlsafe(24)
         code_verifier = secrets.token_urlsafe(48)
-        async with self._client(settings, callback_url) as client:
-            url, _ = client.create_authorization_url(
-                str(settings.authorize_url), state=state, code_verifier=code_verifier
-            )
+        client = self._client(settings, callback_url)
+        url, _ = client.create_authorization_url(
+            str(settings.authorize_url), state=state, code_verifier=code_verifier
+        )
         return BeginResult(
             redirect_url=url,
             flow_state=FlowState(

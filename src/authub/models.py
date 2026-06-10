@@ -189,5 +189,12 @@ class SessionCookieConfig(BaseModel):
     csrf_header_name: str = "x-authub-csrf"
     max_age: int = 8 * 3600
     secure: bool = True
-    samesite: Literal["lax", "strict"] = "lax"
+    samesite: Literal["lax", "strict", "none"] = "lax"
+
+    @model_validator(mode="after")
+    def _none_requires_secure(self) -> SessionCookieConfig:
+        if self.samesite == "none" and not self.secure:
+            raise ValueError("samesite='none' requires secure=True")
+        return self
+
     success_redirect: bool = True  # redirect to return_to instead of returning JSON

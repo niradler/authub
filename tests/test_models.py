@@ -11,6 +11,7 @@ from authub.models import (
     Principal,
     PrincipalType,
     ProtocolSettings,
+    SessionCookieConfig,
     TokenClaims,
     register_settings,
 )
@@ -118,3 +119,13 @@ def test_canonical_identity_requires_external_id() -> None:
 def test_principal_defaults() -> None:
     p = Principal(id="svc_1", type=PrincipalType.SERVICE, tenant_id="t")
     assert p.scopes == [] and p.roles == [] and p.email is None
+
+
+def test_session_cookie_samesite_none_with_secure_accepted() -> None:
+    cfg = SessionCookieConfig(samesite="none", secure=True)
+    assert cfg.samesite == "none"
+
+
+def test_session_cookie_samesite_none_without_secure_rejected() -> None:
+    with pytest.raises(ValidationError, match="secure"):
+        SessionCookieConfig(samesite="none", secure=False)

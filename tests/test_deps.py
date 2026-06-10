@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import timedelta
 
 import httpx
@@ -156,3 +157,22 @@ async def test_bearer_requests_skip_csrf() -> None:
     async with client_for(app) as client:
         response = await client.post("/mutate", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
+
+
+async def test_expired_token_returns_401() -> None:
+    """A token whose exp is in the past is rejected with 401."""
+    app, hub = make_app()
+    principal = Principal(
+        id="u-expired",
+        type=PrincipalType.USER,
+        tenant_id="t",
+    )
+    identity = CanonicalIdentity(external_id="x", raw={})
+    # Build claims with a TTL that places exp in the past
+    claims = build_user_claims(principal, identity, timedelta(seconds=1))
+    # Force exp to be 120 seconds in the past (exceeds the 60-second leeway in JwtTokenService)
+    claims["exp"] = int(time.time()) - 120
+    token = await hub.tokens.sign(claims)
+    async with client_for(app) as client:
+        response = await client.get("/me", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401

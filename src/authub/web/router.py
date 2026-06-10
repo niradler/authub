@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter
-from pydantic import EmailStr
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
@@ -43,11 +42,18 @@ async def authub_error_handler(request: Request, exc: Exception) -> JSONResponse
 
 
 def build_router(hub: Authub) -> APIRouter:
+    """Build the auth ``APIRouter`` with login, callback, logout, and discover endpoints.
+
+    Prefer ``Authub.attach`` or the ``Authub.router`` property over calling this directly.
+    """
     router = APIRouter(tags=["auth"])
 
     @router.get("/discover")
-    async def discover(email: EmailStr) -> dict[str, list[ConnectionInfo]]:
-        return {"connections": await hub.connections.list_for_email(str(email))}
+    async def discover(email: str) -> dict[str, list[ConnectionInfo]]:
+        parts = email.split("@", 1)
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return {"connections": []}
+        return {"connections": await hub.connections.list_for_email(email)}
 
     @router.get("/{connection_id}/login", name="authub_login")
     async def login(request: Request, connection_id: str, return_to: str = "/") -> Response:

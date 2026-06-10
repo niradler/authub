@@ -152,6 +152,17 @@ async def test_discover_uniform_shape() -> None:
     assert unknown.json() == {"connections": []}
 
 
+async def test_discover_malformed_email_returns_200_empty() -> None:
+    app, _ = make_app()
+    async with client_for(app) as client:
+        no_at = await client.get("/auth/discover", params={"email": "notanemail"})
+        no_local = await client.get("/auth/discover", params={"email": "@domain.com"})
+        no_domain = await client.get("/auth/discover", params={"email": "user@"})
+    for response in (no_at, no_local, no_domain):
+        assert response.status_code == 200
+        assert response.json() == {"connections": []}
+
+
 async def test_logout_revokes_bearer_token() -> None:
     revocation = InMemoryRevocationStore()
     app, hub = make_app(revocation=revocation)
@@ -174,3 +185,73 @@ async def test_public_base_url_overrides_callback_host() -> None:
     async with client_for(app) as client:
         response = await client.get("/auth/acme-idp/login", follow_redirects=False)
     assert "cb=https://auth.example.com/auth/acme-idp/callback" in response.headers["location"]
+
+
+async def test_session_cookie_logout_clears_both_cookies() -> None:
+    """POST /auth/logout in cookie-session mode expires both the session and CSRF cookies."""
+    cfg = SessionCookieConfig(secure=False)
+    app, _hub = make_app(session_cookie=cfg)
+    async with client_for(app) as client:
+        # Complete a login so cookies are set
+        await client.get("/auth/acme-idp/login?return_to=/dash", follow_redirects=False)
+        callback = await client.get(
+            "/auth/acme-idp/callback?code=c&state=s", follow_redirects=False
+        )
+        assert callback.status_code == 303
+        session_token = client.cookies.get(cfg.cookie_name)
+        csrf_token = client.cookies.get(cfg.csrf_cookie_name)
+        assert session_token
+        assert csrf_token
+
+        # POST /auth/logout with the CSRF header to pass CSRF check
+        out = await client.post(
+            "/auth/logout",
+            headers={cfg.csrf_header_name: csrf_token},
+        )
+    assert out.status_code == 200
+
+    set_cookie_headers = out.headers.get_list("set-cookie")
+    cookie_names_cleared = {cfg.cookie_name, cfg.csrf_cookie_name}
+    for expected_name in cookie_names_cleared:
+        assert any(
+            expected_name in hdr and ("Max-Age=0" in hdr or "expires" in hdr.lower())
+            for hdr in set_cookie_headers
+        ), f"Expected {expected_name!r} to be cleared in Set-Cookie headers: {set_cookie_headers}"
+
+
+async def test_idp_error_param_returns_400_protocol_error() -> None:
+    """error= param in callback → 400 with error='protocol_error' JSON shape."""
+    from starlette.requests import Request as StarletteRequest
+
+    from authub.errors import ProtocolError
+
+    class ErrorProtocol(FakeProtocol):
+        async def complete(
+            self, *, request: object, conn: object, callback_url: object, flow_state: object
+        ) -> RawIdentity:
+            if isinstance(request, StarletteRequest) and "error" in request.query_params:
+                raise ProtocolError(
+                    f"identity provider returned error: {request.query_params['error']}"
+                )
+            return RawIdentity(claims={"sub": "ext-1", "email": "a@b.co", "name": "Ada"})
+
+    app, hub = make_app()
+    hub.registry.register(ErrorProtocol())
+    async with client_for(app) as client:
+        await client.get("/auth/acme-idp/login", follow_redirects=False)
+        response = await client.get(
+            "/auth/acme-idp/callback?error=access_denied", follow_redirects=False
+        )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "protocol_error"
+
+
+async def test_tampered_state_cookie_returns_400_invalid_state() -> None:
+    """Garbage __authub_state cookie value → 400 with error='invalid_state'."""
+    app, _ = make_app()
+    async with client_for(app) as client:
+        client.cookies.set(STATE_COOKIE, "totally.garbage.value")
+        response = await client.get("/auth/acme-idp/callback?code=c&state=s")
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_state"

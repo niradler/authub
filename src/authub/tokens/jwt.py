@@ -16,6 +16,11 @@ _MIN_HS256_SECRET_LEN = 32
 
 
 class JwtTokenService(TokenService):
+    """``TokenService`` implementation backed by joserfc, supporting HS256 and Ed25519.
+
+    Prefer the ``hs256`` or ``ed25519`` classmethods over direct construction.
+    """
+
     def __init__(
         self,
         key: OctKey | OKPKey,
@@ -34,6 +39,7 @@ class JwtTokenService(TokenService):
 
     @classmethod
     def hs256(cls, secret: str, **kwargs: Any) -> JwtTokenService:
+        """Create a symmetric HS256 service. ``secret`` must be at least 32 characters."""
         if len(secret) < _MIN_HS256_SECRET_LEN:
             raise ConfigurationError(
                 f"HS256 secret must be at least {_MIN_HS256_SECRET_LEN} characters"
@@ -43,6 +49,7 @@ class JwtTokenService(TokenService):
 
     @classmethod
     def ed25519(cls, private_key_pem: bytes | None = None, **kwargs: Any) -> JwtTokenService:
+        """Create an Ed25519 service; generates a keypair when ``private_key_pem`` is omitted."""
         if private_key_pem is not None:
             key = OKPKey.import_key(private_key_pem)
         else:
@@ -51,16 +58,19 @@ class JwtTokenService(TokenService):
 
     @classmethod
     def ed25519_verifier(cls, public_key_pem: bytes, **kwargs: Any) -> JwtTokenService:
+        """Create a verify-only Ed25519 service from a PEM public key."""
         key = OKPKey.import_key(public_key_pem)
         return cls(key=key, algorithm="Ed25519", **kwargs)
 
     @property
     def public_key_pem(self) -> bytes:
+        """Return the PEM-encoded public key. Raises ``ConfigurationError`` for symmetric keys."""
         if not isinstance(self._key, OKPKey):
             raise ConfigurationError("public_key_pem is only available for asymmetric keys")
         return self._key.as_pem(private=False)
 
     async def sign(self, claims: dict[str, Any]) -> str:
+        """Encode claims as a signed JWT, dropping ``None`` values, adding ``iss``/``aud``."""
         payload = {k: v for k, v in claims.items() if v is not None}
         payload["iss"] = self._issuer
         payload["aud"] = self._audience
@@ -72,6 +82,7 @@ class JwtTokenService(TokenService):
         )
 
     async def verify(self, token: str) -> TokenClaims:
+        """Decode and validate a JWT. Raise ``InvalidTokenError`` on any failure."""
         try:
             key = self._verify_key if self._verify_key is not None else self._key
             decoded = jwt.decode(token, key, algorithms=[self._algorithm])
