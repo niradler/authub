@@ -158,7 +158,7 @@ def idp_handle_request(idp: Server, redirect_url: str, *, sign: bool = True) -> 
     resp_args = idp.response_args(parsed.message)
     resp_args.pop("binding", None)
     response_xml = idp.create_authn_response(
-        identity={"mail": ["ada@acme.test"], "cn": ["Ada"]},
+        identity={"mail": ["ada@acme.example"], "cn": ["Ada"]},
         userid="ada",
         name_id=NameID(format=NAMEID_FORMAT_PERSISTENT, text="ada-persistent-id"),
         authn=AUTHN,
@@ -183,7 +183,7 @@ async def test_full_saml_round_trip(idp: Server, settings: SamlSettings) -> None
         callback_url=ACS_URL,
         flow_state=begin.flow_state,
     )
-    assert raw.claims["mail"] == ["ada@acme.test"]
+    assert raw.claims["mail"] == ["ada@acme.example"]
     assert raw.claims["name_id"] == "ada-persistent-id"
     assert raw.claims["issuer"] == IDP_ENTITY
 
