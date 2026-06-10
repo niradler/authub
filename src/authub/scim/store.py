@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -8,7 +9,17 @@ from authub.scim.models import PatchOperation, ScimGroup, ScimMember, ScimMeta, 
 
 
 class ScimConflictError(Exception):
-    """Raised when a duplicate userName/displayName is created within a tenant."""
+    """Raised when a duplicate userName already exists within a tenant."""
+
+
+class ScimInvalidPathError(Exception):
+    """Raised when a PATCH path expression cannot be interpreted."""
+
+
+_MEMBER_FILTER_RE = re.compile(
+    r'^members\[value\s+eq\s+["\'](?P<id>[^"\']+)["\']\]$',
+    re.IGNORECASE,
+)
 
 
 class ScimNotFoundError(Exception):
@@ -167,6 +178,9 @@ class InMemoryScimUserStore(ScimUserStore):
         existing = self._users.get((tenant_id, user_id))
         if existing is None:
             return None
+        for (tid, uid), other in self._users.items():
+            if tid == tenant_id and uid != user_id and other.user_name == user.user_name:
+                raise ScimConflictError(f"userName {user.user_name!r} already exists")
         now = _now_iso()
         location = f"/scim/v2/Users/{user_id}"
         stored = user.model_copy(
@@ -198,7 +212,8 @@ class InMemoryScimUserStore(ScimUserStore):
             if normalized in ("replace", "add") and path is not None:
                 data[_snake(path)] = value
             elif normalized == "remove" and path is not None:
-                data[_snake(path)] = None
+                snake_path = _snake(path)
+                data[snake_path] = False if snake_path == "active" else None
             elif normalized in ("add", "replace") and path is None and isinstance(value, dict):
                 for k, v in value.items():
                     data[_snake(k)] = v
@@ -346,6 +361,17 @@ class InMemoryScimGroupStore(ScimGroupStore):
                     members = [m for m in members if m.value not in remove_ids]
                 elif normalized == "replace":
                     members = _parse_member_list(value)
+            elif path is not None and path.startswith("members["):
+                if normalized == "remove":
+                    filter_match = _MEMBER_FILTER_RE.match(path)
+                    if filter_match is None:
+                        raise ScimInvalidPathError(f"Unsupported member filter path: {path!r}")
+                    target_id = filter_match.group("id")
+                    members = [mem for mem in members if mem.value != target_id]
+                else:
+                    raise ScimInvalidPathError(
+                        f"Unsupported op {normalized!r} on member filter path"
+                    )
             elif path == "displayName" and normalized in ("add", "replace"):
                 display_name = str(value)
         now = _now_iso()

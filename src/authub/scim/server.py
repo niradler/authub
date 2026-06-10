@@ -5,6 +5,7 @@ from functools import cached_property
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
+from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -24,10 +25,12 @@ from authub.scim.store import (
     InMemoryScimUserStore,
     ScimConflictError,
     ScimGroupStore,
+    ScimInvalidPathError,
     ScimUserStore,
 )
 
 _SCIM_CONTENT_TYPE = "application/scim+json"
+_MAX_PAGE_SIZE = 200
 
 _FILTER_RE = re.compile(
     r'^(?P<attr>\w+)\s+eq\s+["\'](?P<value>[^"\']*)["\']$',
@@ -45,6 +48,13 @@ def _scim_response(data: dict[str, Any], status: int = 200) -> JSONResponse:
 def _error(status: int, detail: str, scim_type: str | None = None) -> JSONResponse:
     err = ScimError(status=str(status), detail=detail, scim_type=scim_type)
     return err.to_response()
+
+
+def _stamp_location(data: dict[str, Any], kind: str, prefix: str) -> str:
+    location = f"{prefix}/{kind}/{data.get('id', '')}"
+    if isinstance(data.get("meta"), dict):
+        data["meta"]["location"] = location
+    return location
 
 
 def _parse_filter(
@@ -90,6 +100,7 @@ class ScimServer:
         self.authenticator = authenticator
         self.users: ScimUserStore = users if users is not None else InMemoryScimUserStore()
         self.groups: ScimGroupStore = groups if groups is not None else InMemoryScimGroupStore()
+        self._prefix: str = "/scim/v2"
 
     async def _resolve_tenant(
         self, request: Request
@@ -188,9 +199,9 @@ class ScimServer:
             except ScimConflictError:
                 return _error(409, "User with this userName already exists", "uniqueness")
             data = created.model_dump(by_alias=True, exclude_none=True)
-            location = created.meta.location if created.meta else f"/scim/v2/Users/{created.id}"
+            location = _stamp_location(data, "Users", self._prefix)
             resp = _scim_response(data, 201)
-            resp.headers["Location"] = location or ""
+            resp.headers["Location"] = location
             return resp
 
         @router.get("/Users/{user_id}")
@@ -201,7 +212,9 @@ class ScimServer:
             user = await self.users.get(tenant_id, user_id)
             if user is None:
                 return _error(404, "User not found")
-            return _scim_response(user.model_dump(by_alias=True, exclude_none=True))
+            data = user.model_dump(by_alias=True, exclude_none=True)
+            _stamp_location(data, "Users", self._prefix)
+            return _scim_response(data)
 
         @router.get("/Users")
         async def list_users(request: Request) -> Response:
@@ -211,8 +224,8 @@ class ScimServer:
             params = request.query_params
             filter_str = params.get("filter")
             try:
-                start_index = int(params.get("startIndex", "1"))
-                count = int(params.get("count", "100"))
+                start_index = max(1, int(params.get("startIndex", "1")))
+                count = min(_MAX_PAGE_SIZE, max(0, int(params.get("count", "100"))))
             except ValueError:
                 return _error(400, "startIndex and count must be integers")
             filter_attr, filter_value, filter_err = _parse_filter(
@@ -246,10 +259,17 @@ class ScimServer:
                 user = ScimUser.model_validate(body)
             except Exception:
                 return _error(400, "Invalid user payload")
-            updated = await self.users.replace(tenant_id, user_id, user)
+            try:
+                updated = await self.users.replace(tenant_id, user_id, user)
+            except ScimConflictError:
+                return _error(409, "User with this userName already exists", "uniqueness")
+            except (ValidationError, ValueError) as exc:
+                return _error(400, str(exc), "invalidValue")
             if updated is None:
                 return _error(404, "User not found")
-            return _scim_response(updated.model_dump(by_alias=True, exclude_none=True))
+            data = updated.model_dump(by_alias=True, exclude_none=True)
+            _stamp_location(data, "Users", self._prefix)
+            return _scim_response(data)
 
         @router.patch("/Users/{user_id}")
         async def patch_user(user_id: str, request: Request) -> Response:
@@ -261,10 +281,15 @@ class ScimServer:
                 patch_req = PatchRequest.model_validate(body)
             except Exception:
                 return _error(400, "Invalid patch payload")
-            updated = await self.users.patch(tenant_id, user_id, patch_req.operations)
+            try:
+                updated = await self.users.patch(tenant_id, user_id, patch_req.operations)
+            except (ValidationError, ValueError) as exc:
+                return _error(400, str(exc), "invalidValue")
             if updated is None:
                 return _error(404, "User not found")
-            return _scim_response(updated.model_dump(by_alias=True, exclude_none=True))
+            data = updated.model_dump(by_alias=True, exclude_none=True)
+            _stamp_location(data, "Users", self._prefix)
+            return _scim_response(data)
 
         @router.delete("/Users/{user_id}")
         async def delete_user(user_id: str, request: Request) -> Response:
@@ -288,9 +313,9 @@ class ScimServer:
                 return _error(400, "Invalid group payload")
             created = await self.groups.create(tenant_id, group)
             data = created.model_dump(by_alias=True, exclude_none=True)
-            location = created.meta.location if created.meta else f"/scim/v2/Groups/{created.id}"
+            location = _stamp_location(data, "Groups", self._prefix)
             resp = _scim_response(data, 201)
-            resp.headers["Location"] = location or ""
+            resp.headers["Location"] = location
             return resp
 
         @router.get("/Groups/{group_id}")
@@ -301,7 +326,9 @@ class ScimServer:
             group = await self.groups.get(tenant_id, group_id)
             if group is None:
                 return _error(404, "Group not found")
-            return _scim_response(group.model_dump(by_alias=True, exclude_none=True))
+            data = group.model_dump(by_alias=True, exclude_none=True)
+            _stamp_location(data, "Groups", self._prefix)
+            return _scim_response(data)
 
         @router.get("/Groups")
         async def list_groups(request: Request) -> Response:
@@ -311,8 +338,8 @@ class ScimServer:
             params = request.query_params
             filter_str = params.get("filter")
             try:
-                start_index = int(params.get("startIndex", "1"))
-                count = int(params.get("count", "100"))
+                start_index = max(1, int(params.get("startIndex", "1")))
+                count = min(_MAX_PAGE_SIZE, max(0, int(params.get("count", "100"))))
             except ValueError:
                 return _error(400, "startIndex and count must be integers")
             filter_attr, filter_value, filter_err = _parse_filter(
@@ -346,10 +373,15 @@ class ScimServer:
                 group = ScimGroup.model_validate(body)
             except Exception:
                 return _error(400, "Invalid group payload")
-            updated = await self.groups.replace(tenant_id, group_id, group)
+            try:
+                updated = await self.groups.replace(tenant_id, group_id, group)
+            except (ValidationError, ValueError) as exc:
+                return _error(400, str(exc), "invalidValue")
             if updated is None:
                 return _error(404, "Group not found")
-            return _scim_response(updated.model_dump(by_alias=True, exclude_none=True))
+            data = updated.model_dump(by_alias=True, exclude_none=True)
+            _stamp_location(data, "Groups", self._prefix)
+            return _scim_response(data)
 
         @router.patch("/Groups/{group_id}")
         async def patch_group(group_id: str, request: Request) -> Response:
@@ -361,10 +393,17 @@ class ScimServer:
                 patch_req = PatchRequest.model_validate(body)
             except Exception:
                 return _error(400, "Invalid patch payload")
-            updated = await self.groups.patch(tenant_id, group_id, patch_req.operations)
+            try:
+                updated = await self.groups.patch(tenant_id, group_id, patch_req.operations)
+            except ScimInvalidPathError as exc:
+                return _error(400, str(exc), "invalidPath")
+            except (ValidationError, ValueError) as exc:
+                return _error(400, str(exc), "invalidValue")
             if updated is None:
                 return _error(404, "Group not found")
-            return _scim_response(updated.model_dump(by_alias=True, exclude_none=True))
+            data = updated.model_dump(by_alias=True, exclude_none=True)
+            _stamp_location(data, "Groups", self._prefix)
+            return _scim_response(data)
 
         @router.delete("/Groups/{group_id}")
         async def delete_group(group_id: str, request: Request) -> Response:
@@ -385,4 +424,5 @@ class ScimServer:
             app: The FastAPI application to mount onto.
             prefix: URL prefix for all SCIM routes (default ``"/scim/v2"``).
         """
-        app.include_router(self.router, prefix=prefix)
+        self._prefix = prefix.rstrip("/")
+        app.include_router(self.router, prefix=self._prefix)

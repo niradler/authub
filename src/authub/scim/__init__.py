@@ -17,7 +17,9 @@ from authub.scim.server import ScimServer
 from authub.scim.store import (
     InMemoryScimGroupStore,
     InMemoryScimUserStore,
+    ScimConflictError,
     ScimGroupStore,
+    ScimInvalidPathError,
     ScimUserStore,
 )
 
@@ -28,10 +30,12 @@ __all__ = [
     "PatchOperation",
     "PatchRequest",
     "ScimAuthenticator",
+    "ScimConflictError",
     "ScimEmail",
     "ScimError",
     "ScimGroup",
     "ScimGroupStore",
+    "ScimInvalidPathError",
     "ScimMember",
     "ScimMeta",
     "ScimName",

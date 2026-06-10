@@ -312,3 +312,182 @@ async def test_external_id_filter() -> None:
     assert resp.status_code == 200
     assert resp.json()["totalResults"] == 1
     assert resp.json()["Resources"][0]["userName"] == "judy"
+
+
+async def test_patch_remove_required_field_returns_400_not_500() -> None:
+    _, client = make_app()
+    create = await client.post("/scim/v2/Users", json={"userName": "kent"}, headers=HDR_A)
+    uid = create.json()["id"]
+
+    resp = await client.patch(
+        f"/scim/v2/Users/{uid}",
+        json={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [{"op": "remove", "path": "userName"}],
+        },
+        headers=HDR_A,
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert "urn:ietf:params:scim:api:messages:2.0:Error" in body["schemas"]
+    assert body["scimType"] == "invalidValue"
+
+
+async def test_put_username_conflict_returns_409() -> None:
+    _, client = make_app()
+    await client.post("/scim/v2/Users", json={"userName": "alice"}, headers=HDR_A)
+    bob = await client.post("/scim/v2/Users", json={"userName": "bob"}, headers=HDR_A)
+    bob_id = bob.json()["id"]
+
+    resp = await client.put(
+        f"/scim/v2/Users/{bob_id}",
+        json={"userName": "alice"},
+        headers=HDR_A,
+    )
+    assert resp.status_code == 409
+    assert resp.json()["scimType"] == "uniqueness"
+
+
+async def test_group_create_duplicate_displayname_201_twice() -> None:
+    _, client = make_app()
+    r1 = await client.post("/scim/v2/Groups", json={"displayName": "engineers"}, headers=HDR_A)
+    assert r1.status_code == 201
+    r2 = await client.post("/scim/v2/Groups", json={"displayName": "engineers"}, headers=HDR_A)
+    assert r2.status_code == 201
+    assert r1.json()["id"] != r2.json()["id"]
+
+
+async def test_group_patch_azure_member_remove() -> None:
+    _, client = make_app()
+
+    user1 = await client.post("/scim/v2/Users", json={"userName": "liam"}, headers=HDR_A)
+    uid1 = user1.json()["id"]
+    user2 = await client.post("/scim/v2/Users", json={"userName": "mia"}, headers=HDR_A)
+    uid2 = user2.json()["id"]
+
+    grp = await client.post("/scim/v2/Groups", json={"displayName": "ops"}, headers=HDR_A)
+    gid = grp.json()["id"]
+
+    await client.patch(
+        f"/scim/v2/Groups/{gid}",
+        json={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [
+                {"op": "add", "path": "members", "value": [{"value": uid1}, {"value": uid2}]},
+            ],
+        },
+        headers=HDR_A,
+    )
+
+    resp = await client.patch(
+        f"/scim/v2/Groups/{gid}",
+        json={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [
+                {"op": "remove", "path": f'members[value eq "{uid1}"]'},
+            ],
+        },
+        headers=HDR_A,
+    )
+    assert resp.status_code == 200
+    remaining = [m["value"] for m in resp.json()["members"]]
+    assert uid1 not in remaining
+    assert uid2 in remaining
+
+
+async def test_group_patch_azure_remove_unsupported_operator_400() -> None:
+    _, client = make_app()
+    grp = await client.post("/scim/v2/Groups", json={"displayName": "qa"}, headers=HDR_A)
+    gid = grp.json()["id"]
+
+    resp = await client.patch(
+        f"/scim/v2/Groups/{gid}",
+        json={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [
+                {"op": "remove", "path": 'members[value sw "usr_"]'},
+            ],
+        },
+        headers=HDR_A,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["scimType"] == "invalidPath"
+
+
+async def test_patch_remove_active_disables_user() -> None:
+    _, client = make_app()
+    create = await client.post("/scim/v2/Users", json={"userName": "noah"}, headers=HDR_A)
+    uid = create.json()["id"]
+    assert create.json()["active"] is True
+
+    resp = await client.patch(
+        f"/scim/v2/Users/{uid}",
+        json={
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [{"op": "remove", "path": "active"}],
+        },
+        headers=HDR_A,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["active"] is False
+
+
+async def test_pagination_negative_count_clamped() -> None:
+    _, client = make_app()
+    resp = await client.get("/scim/v2/Users?count=-1", headers=HDR_A)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["itemsPerPage"] >= 0
+    assert body["startIndex"] >= 1
+
+
+async def test_pagination_start_index_zero_clamped() -> None:
+    _, client = make_app()
+    for i in range(3):
+        await client.post("/scim/v2/Users", json={"userName": f"page_user{i}"}, headers=HDR_A)
+
+    resp = await client.get("/scim/v2/Users?startIndex=0&count=10", headers=HDR_A)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["startIndex"] == 1
+    assert body["totalResults"] == 3
+
+
+async def test_meta_location_uses_custom_prefix() -> None:
+    from authub.scim import ScimServer, StaticTokenAuthenticator
+
+    auth = StaticTokenAuthenticator({"tok": "t1"})
+    server = ScimServer(authenticator=auth)
+    app = FastAPI()
+    server.attach(app, prefix="/api/scim/v2")
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+    resp = await client.post(
+        "/api/scim/v2/Users",
+        json={"userName": "olivia"},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["meta"]["location"].startswith("/api/scim/v2/Users/")
+    assert resp.headers["Location"].startswith("/api/scim/v2/Users/")
+
+    user_id = body["id"]
+    got = await client.get(
+        f"/api/scim/v2/Users/{user_id}", headers={"Authorization": "Bearer tok"}
+    )
+    assert got.json()["meta"]["location"] == f"/api/scim/v2/Users/{user_id}"
+
+    put = await client.put(
+        f"/api/scim/v2/Users/{user_id}",
+        json={"userName": "olivia"},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert put.json()["meta"]["location"] == f"/api/scim/v2/Users/{user_id}"
+
+    patched = await client.patch(
+        f"/api/scim/v2/Users/{user_id}",
+        json={"Operations": [{"op": "replace", "path": "active", "value": False}]},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert patched.json()["meta"]["location"] == f"/api/scim/v2/Users/{user_id}"
