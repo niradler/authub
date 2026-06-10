@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 from authub.protocols.saml._constants import BINDING_HTTP_REDIRECT
 from authub.protocols.saml._xml import element_text, query, to_etree
@@ -14,7 +15,16 @@ class IdpInfo:
     cert_pem: bytes
 
 
+@lru_cache(maxsize=128)
+def _parse_idp_metadata_cached(xml: str, entity_id: str | None) -> IdpInfo:
+    return _parse_idp_metadata_impl(xml, entity_id)
+
+
 def parse_idp_metadata(xml: str, entity_id: str | None = None) -> IdpInfo:
+    return _parse_idp_metadata_cached(xml, entity_id)
+
+
+def _parse_idp_metadata_impl(xml: str, entity_id: str | None = None) -> IdpInfo:
     dom = to_etree(xml.encode() if isinstance(xml, str) else xml)
 
     path = "//md:EntityDescriptor"
