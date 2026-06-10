@@ -38,7 +38,7 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
                 id="authub-idp",
                 tenant_id="acme",
                 display_name="Dev IdP",
-                settings=presets.dev_idp(ISSUER, "authub-app", "dev-secret"),
+                settings=presets.authub_idp(ISSUER, "authub-app", "dev-secret"),
                 mapping=Mapping(),
             )
         ],

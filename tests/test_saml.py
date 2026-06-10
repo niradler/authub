@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from starlette.requests import Request
 
 pytest.importorskip("saml2")
@@ -21,9 +23,13 @@ if _XMLSEC is not None:
     from saml2.saml import NAMEID_FORMAT_PERSISTENT, NameID
     from saml2.server import Server
 
+    from authub import Authub, Connection, Mapping
     from authub.errors import ProtocolError
-    from authub.models import Connection, SamlSettings
+    from authub.models import SamlSettings
     from authub.protocols.saml import SamlProtocol
+    from authub.state import STATE_COOKIE
+    from authub.stores.memory import InMemoryConnectionStore
+    from authub.tokens.jwt import JwtTokenService
 
 SP_ENTITY = "https://app.test/saml/metadata"
 IDP_ENTITY = "https://idp.test/metadata"
@@ -215,3 +221,52 @@ async def test_unknown_in_response_to_rejected(idp: Server, settings: SamlSettin
             callback_url=ACS_URL,
             flow_state=forged_state,
         )
+
+
+async def test_saml_login_through_http_router(idp: Server, settings: SamlSettings) -> None:
+    """Full SAML SP flow through the Authub HTTP router: login → IdP → callback → token."""
+    saml_mapping = Mapping(external_id="name_id", email="mail", name="cn")
+    connection = Connection(
+        id="acme-saml",
+        tenant_id="acme",
+        display_name="Acme SAML",
+        settings=settings,
+        mapping=saml_mapping,
+    )
+    hub = Authub(
+        connections=InMemoryConnectionStore([connection]),
+        tokens=JwtTokenService.hs256("s" * 32),
+        state_secret="x" * 32,
+    )
+    app = FastAPI()
+    hub.attach(app)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        # 1. GET /auth/acme-saml/login → redirect to IdP with SAMLRequest
+        login = await client.get("/auth/acme-saml/login", follow_redirects=False)
+        assert login.status_code == 302
+        redirect_url = login.headers["location"]
+        assert "SAMLRequest=" in redirect_url
+
+        # State cookie must be set
+        state_cookie = client.cookies.get(STATE_COOKIE)
+        assert state_cookie, "state cookie must be present after login"
+
+        # 2. Fabricate the signed SAMLResponse from the in-process IdP
+        saml_response_b64 = idp_handle_request(idp, redirect_url)
+
+        # 3. POST SAMLResponse to /auth/acme-saml/callback as form data
+        # (state cookie is already in client.cookies)
+        callback = await client.post(
+            "/auth/acme-saml/callback",
+            data={"SAMLResponse": saml_response_b64, "RelayState": "/"},
+        )
+        assert callback.status_code == 200, callback.text
+        body = callback.json()
+        assert "access_token" in body
+
+        # 4. Verify the issued token carries the correct tenant
+        claims = await hub.verify_token(body["access_token"])
+        assert claims.tenant_id == "acme"
+        assert claims.email is not None

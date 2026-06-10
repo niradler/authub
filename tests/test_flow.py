@@ -13,6 +13,7 @@ from authub.mapping import Mapper
 from authub.models import (
     CanonicalIdentity,
     Connection,
+    Mapping,
     OidcSettings,
     Principal,
     RawIdentity,
@@ -134,3 +135,142 @@ async def test_plugin_can_stamp_and_reject() -> None:
             callback_url="http://a/cb",
             flow_state=begin.flow_state,
         )
+
+
+# ---------------------------------------------------------------------------
+# Claim mapping end-to-end
+# ---------------------------------------------------------------------------
+
+
+class FakeProtocolWithClaims(AuthProtocol):
+    """Protocol that returns arbitrary claims supplied at construction time."""
+
+    kind = "oidc"
+
+    def __init__(self, claims: dict[str, Any]) -> None:
+        self._claims = claims
+
+    async def begin(self, *, conn: Any, callback_url: Any, return_to: Any) -> BeginResult:
+        return BeginResult(
+            redirect_url="https://idp/auth",
+            flow_state=FlowState(connection_id=conn.id, return_to=return_to),
+        )
+
+    async def complete(
+        self, *, request: Any, conn: Any, callback_url: Any, flow_state: Any
+    ) -> RawIdentity:
+        return RawIdentity(claims=self._claims)
+
+
+def make_flow_with_mapping(
+    raw_claims: dict[str, Any],
+    mapping: Mapping,
+    plugins: PluginChain | None = None,
+) -> AuthFlow:
+    conn = Connection(
+        id="c1",
+        tenant_id="acme",
+        display_name="C",
+        settings=OidcSettings(
+            issuer=TypeAdapter(AnyHttpUrl).validate_python("https://i.test"),
+            client_id="x",
+            client_secret=SecretStr("y"),
+        ),
+        mapping=mapping,
+    )
+    registry = ProtocolRegistry()
+    registry.register(FakeProtocolWithClaims(raw_claims))
+    return AuthFlow(
+        connections=InMemoryConnectionStore([conn]),
+        users=InMemoryUserStore(),
+        tokens=JwtTokenService.hs256("s" * 32),
+        registry=registry,
+        plugins=plugins or PluginChain(),
+        mapper=Mapper(),
+        user_token_ttl=timedelta(hours=1),
+    )
+
+
+async def test_claim_mapping_non_default_paths_and_lower_transform() -> None:
+    """email from 'mail', roles from 'groups', 'lower' transform applied to email."""
+    mapping = Mapping(
+        external_id="sub",
+        email="mail",
+        roles="groups",
+        transforms={"email": "lower"},
+    )
+    raw = {"sub": "u1", "mail": "Ada@TEST.COM", "groups": ["admin"]}
+    flow = make_flow_with_mapping(raw, mapping)
+    begin = await flow.begin(connection_id="c1", callback_url="http://a/cb", return_to="/")
+    token, principal = await flow.complete(
+        request=dummy_request(),
+        connection_id="c1",
+        callback_url="http://a/cb",
+        flow_state=begin.flow_state,
+    )
+    # Email lowercased via transform
+    assert principal.email == "ada@test.com"
+    # Roles extracted from 'groups'
+    assert principal.roles == ["admin"]
+    # Token encodes the mapped identity
+    claims = await flow.tokens.verify(token)
+    assert claims.email == "ada@test.com"
+    assert claims.roles == ["admin"]
+    assert claims.tenant_id == "acme"
+
+
+# ---------------------------------------------------------------------------
+# Plugin hooks: on_identity and on_user_provisioned
+# ---------------------------------------------------------------------------
+
+
+async def test_on_identity_can_mutate_raw_claims() -> None:
+    """on_identity hook can enrich RawIdentity claims before mapping."""
+
+    class EnrichPlugin(Plugin):
+        async def on_identity(self, raw: RawIdentity, conn: Connection) -> None:
+            raw.claims["email"] = "enriched@example.com"
+
+    raw = {"sub": "u1", "email": "original@example.com", "name": "Ada"}
+    flow = make_flow_with_mapping(
+        raw,
+        Mapping(),
+        plugins=PluginChain([EnrichPlugin()]),
+    )
+    begin = await flow.begin(connection_id="c1", callback_url="http://a/cb", return_to="/")
+    _token, principal = await flow.complete(
+        request=dummy_request(),
+        connection_id="c1",
+        callback_url="http://a/cb",
+        flow_state=begin.flow_state,
+    )
+    assert principal.email == "enriched@example.com"
+
+
+async def test_on_user_provisioned_is_called_with_principal() -> None:
+    """on_user_provisioned is invoked exactly once with the provisioned principal."""
+    provisioned: list[tuple[Principal, CanonicalIdentity]] = []
+
+    class RecordPlugin(Plugin):
+        async def on_user_provisioned(
+            self, principal: Principal, identity: CanonicalIdentity
+        ) -> None:
+            provisioned.append((principal, identity))
+
+    raw = {"sub": "u1", "email": "a@b.co", "name": "Ada"}
+    flow = make_flow_with_mapping(
+        raw,
+        Mapping(),
+        plugins=PluginChain([RecordPlugin()]),
+    )
+    begin = await flow.begin(connection_id="c1", callback_url="http://a/cb", return_to="/")
+    _token, principal = await flow.complete(
+        request=dummy_request(),
+        connection_id="c1",
+        callback_url="http://a/cb",
+        flow_state=begin.flow_state,
+    )
+    assert len(provisioned) == 1
+    recorded_principal, recorded_identity = provisioned[0]
+    assert recorded_principal.id == principal.id
+    assert recorded_identity.external_id == "u1"
