@@ -473,9 +473,7 @@ async def test_meta_location_uses_custom_prefix() -> None:
     assert resp.headers["Location"].startswith("/api/scim/v2/Users/")
 
     user_id = body["id"]
-    got = await client.get(
-        f"/api/scim/v2/Users/{user_id}", headers={"Authorization": "Bearer tok"}
-    )
+    got = await client.get(f"/api/scim/v2/Users/{user_id}", headers={"Authorization": "Bearer tok"})
     assert got.json()["meta"]["location"] == f"/api/scim/v2/Users/{user_id}"
 
     put = await client.put(
