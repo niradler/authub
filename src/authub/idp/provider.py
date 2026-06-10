@@ -253,8 +253,8 @@ class AuthubIdp:
             }
 
         @router.get("/jwks")
-        async def jwks() -> KeySetSerialization:
-            return self.jwks()
+        async def jwks() -> JSONResponse:
+            return JSONResponse(dict(self.jwks()))
 
         @router.get("/authorize")
         async def authorize(request: Request) -> Response:
