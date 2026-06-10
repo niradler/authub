@@ -32,8 +32,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-saml = ["pysaml2>=7.5"]
-all = ["pysaml2>=7.5"]
+saml = ["pysaml2>=7.5", "pyopenssl>=25"]
+all = ["pysaml2>=7.5", "pyopenssl>=25"]
 
 [project.urls]
 Homepage = "https://github.com/niradler/authub"
