@@ -22,6 +22,13 @@ from authub.models import (
     register_settings,
 )
 from authub.plugins import Plugin
+from authub.scim import (
+    InMemoryScimGroupStore,
+    InMemoryScimUserStore,
+    ScimAuthenticator,
+    ScimServer,
+    StaticTokenAuthenticator,
+)
 
 try:
     __version__ = metadata.version("authub")
@@ -34,6 +41,8 @@ __all__ = [
     "CanonicalIdentity",
     "Connection",
     "ConnectionInfo",
+    "InMemoryScimGroupStore",
+    "InMemoryScimUserStore",
     "Mapper",
     "Mapping",
     "OAuth2Settings",
@@ -44,7 +53,10 @@ __all__ = [
     "ProtocolSettings",
     "RawIdentity",
     "SamlSettings",
+    "ScimAuthenticator",
+    "ScimServer",
     "SessionCookieConfig",
+    "StaticTokenAuthenticator",
     "TokenClaims",
     "register_settings",
     "register_transform",
